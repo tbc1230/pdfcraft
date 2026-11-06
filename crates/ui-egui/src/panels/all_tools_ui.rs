@@ -78,7 +78,7 @@ pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 let mut any = false;
                 for category in TOOL_CATEGORIES {
                     let found: Vec<_> =
-                        category.groups.iter().filter_map(|id| catalog::group(id)).filter_map(|g| matches(&query, g).map(|m| (g, m))).collect();
+                        category.groups.iter().filter(|id| super::tool_listed(id)).filter_map(|id| catalog::group(id)).filter_map(|g| matches(&query, g).map(|m| (g, m))).collect();
                     if found.is_empty() {
                         continue;
                     }

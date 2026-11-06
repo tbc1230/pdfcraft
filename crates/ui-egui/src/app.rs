@@ -78,7 +78,8 @@ impl PdfCraftApp {
             mode_override: None,
             left: LeftPanel::AllTools,
             side_panels: Default::default(),
-            left_open: true,
+            // Workspace: the web build starts with the All tools sidebar hidden.
+            left_open: cfg!(not(target_arch = "wasm32")),
             right: None,
             last_right: RightPanel::Comments,
             right_before_read: None,

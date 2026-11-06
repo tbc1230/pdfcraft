@@ -179,6 +179,8 @@ impl PdfCraftApp {
         }
         let panels = side_panels::restore(&v);
         self.side_panels = panels.panels;
+        // Workspace: in the web build the sidebar is hidden at every start, whatever was saved.
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(open) = panels.tools_open {
             self.left_open = open;
         }

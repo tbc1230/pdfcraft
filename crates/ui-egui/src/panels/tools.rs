@@ -81,8 +81,9 @@ fn all_tools(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         clear_of_scrollbar(ui);
         ui.add_space(2.0);
-        let shown = if app.all_tools_expanded { TOOL_GROUPS.len() } else { COLLAPSED_TOOLS.min(TOOL_GROUPS.len()) };
-        for g in &TOOL_GROUPS[..shown] {
+        let listed: Vec<&ToolGroup> = TOOL_GROUPS.iter().filter(|g| super::tool_listed(g.id)).collect();
+        let shown = if app.all_tools_expanded { listed.len() } else { COLLAPSED_TOOLS.min(listed.len()) };
+        for g in listed.into_iter().take(shown) {
             let (resp, pin_clicked) = tool_row(ui, t, g, app.is_tool_pinned(g.id));
             if pin_clicked {
                 app.toggle_pin_tool(g.id);

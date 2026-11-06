@@ -27,6 +27,14 @@ pub use right::right_panel;
 pub use tools::left_panel;
 pub(crate) use tools::panel_header;
 
+/// Workspace: tool groups the web build leaves out of All tools.
+const WORKSPACE_HIDDEN_TOOLS: &[&str] = &["export", "create", "stamp", "standards", "javascript", "ai"];
+
+/// Whether All tools (the sidebar and the expanded view) lists this tool group.
+pub(crate) fn tool_listed(id: &str) -> bool {
+    cfg!(not(target_arch = "wasm32")) || !WORKSPACE_HIDDEN_TOOLS.contains(&id)
+}
+
 // ───────────────────────────────────────────────────────────────────────────── right panels
 
 pub(crate) enum Nav {
