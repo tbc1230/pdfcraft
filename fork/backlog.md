@@ -14,7 +14,7 @@ sources:
 # How to read the backlog
 
 ## Acceptance criteria are the target behaviour
-The backlog writes acceptance criteria in the present tense, as the behaviour Workspace and the fork must have. They are not descriptions of how the code behaves today and not bug reports. "The editor does not show the tab strip" means: make the editor not show the tab strip. Where the code does not yet behave as a criterion says, that gap is the work. Where it already does, say so.
+The backlog writes acceptance criteria in the present tense, as the behaviour Workspace and the fork must have. They are not descriptions of how the code behaves today and not bug reports. "The editor does not show the tab strip" means: make the editor not show the tab strip. Where the code does not yet behave as a criterion says, that gap is the work.
 
 ## Which items concern the fork
 Every item has a Component:[^backlog]
