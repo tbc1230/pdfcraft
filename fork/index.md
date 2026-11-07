@@ -18,6 +18,7 @@ This folder is the fork's own knowledge, in Open Knowledge Format (OKF) v0.2. Ev
 
 ## Procedures
 - [Sync the fork branch with upstream](/procedures/upstream-sync.md)
+- [Integrate worker changes](/procedures/integrate.md)
 
 ## Fork changes
 - [All tools sidebar hidden by default in the web build](/changes/all-tools-sidebar-hidden.md)

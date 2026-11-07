@@ -13,6 +13,9 @@
 - Checked: every record under `changes/` still matches the code; `cargo check` passes for `pdfcraft-web` (wasm32) and `pdfcraft-ui-egui` with tests (native).
 - New from upstream: `apps/pdfcraft-web/src/api.rs`, `window.pdfcraft`, a page command API in the web build, opt-in with `?control` (commands, execute, docInspect, uiInspect, screenshot).
 
+## 2026-11-07 (integrate procedure)
+- Added procedure integrate: the integrator's steps after workers report. The Quality gates and Testing sections of `.claude/CLAUDE.md` now say they are the integrator's.
+
 ## 2026-11-07 (sync procedure)
 - Added procedure upstream-sync, from the steps of the first sync.
 
