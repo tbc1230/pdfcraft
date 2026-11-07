@@ -1504,6 +1504,7 @@ fn dialog_shortcuts(ui: &mut egui::Ui) -> bool {
     // keys the document view handles itself.
     let mut rows: Vec<(String, String)> = pdfcraft_engine::commands::COMMANDS
         .iter()
+        .filter(|c| crate::commands::offered(c.id))
         .filter_map(|c| c.shortcut.map(|k| (crate::commands::shortcut_label(ui.ctx(), k), tl!(c.label).trim_end_matches('…').to_string())))
         .collect();
     let key = |s: pdfcraft_engine::commands::Shortcut| crate::commands::shortcut_label(ui.ctx(), s);

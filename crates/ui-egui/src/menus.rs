@@ -283,12 +283,13 @@ impl PdfCraftApp {
         let mut used: Vec<&str> = Vec::new();
         let list = |ids: &[&'static str], used: &mut Vec<&'static str>| -> Vec<Node> {
             ids.iter()
-                .map(|&id| {
+                .filter_map(|&id| {
                     if id == SEP {
-                        return Node::Separator;
+                        return Some(Node::Separator);
                     }
                     used.push(id);
-                    self.menu_item(id, None)
+                    // A command the editor does not offer (Preferences on the web) has no menu item.
+                    crate::commands::offered(id).then(|| self.menu_item(id, None))
                 })
                 .collect()
         };

@@ -35,7 +35,7 @@ pub(super) fn edit_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g
         let title_width = (ui.available_width() - 2.0 * (26.0 + ui.spacing().item_spacing.x)).max(1.0);
         ui.add_sized([title_width, 26.0], egui::Label::new(egui::RichText::new(title).font(theme::semibold(15.5)).color(t.text)).truncate())
             .on_hover_text(title);
-        if icons::button(ui, "settings", 26.0, false, tl!("Preferences")).clicked() {
+        if crate::commands::offered("app.preferences") && icons::button(ui, "settings", 26.0, false, tl!("Preferences")).clicked() {
             run = Some("app.preferences");
         }
         if icons::button(ui, "x", 26.0, false, tl!("Close panel")).clicked() {

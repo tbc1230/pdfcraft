@@ -708,7 +708,11 @@ impl eframe::App for PdfCraftApp {
             }
             return;
         }
-        chrome::tab_strip(self, ui);
+        // The web build embeds the editor in Workspace, which supplies its own document chrome:
+        // no tab strip (fork change "tab-strip-hidden").
+        if cfg!(not(target_arch = "wasm32")) {
+            chrome::tab_strip(self, ui);
+        }
         chrome::mode_bar(self, ui);
         // Whichever way another tab came to the front, it shows instead of the expanded view.
         if self.all_tools_full && self.all_tools_tab != self.shown_tab() {

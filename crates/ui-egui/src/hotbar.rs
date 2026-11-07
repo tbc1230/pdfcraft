@@ -834,7 +834,7 @@ pub(crate) fn show(app: &mut PdfCraftApp, area: Rect, page_left: Option<f32>, ui
             egui::ScrollArea::vertical().max_height(max_list_height).auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 5.0;
                 for spec in COMMANDS {
-                    if !matches_search(spec, &bar.search) {
+                    if !crate::commands::offered(spec.id) || !matches_search(spec, &bar.search) {
                         continue;
                     }
                     let mut selected = bar.tools.iter().any(|id| id == spec.id);

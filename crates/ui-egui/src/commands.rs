@@ -31,6 +31,13 @@ pub(crate) const SELECT_ALL: Shortcut = Shortcut::cmd("A");
 pub(crate) const PAGE_PREV: Shortcut = Shortcut::cmd("←");
 pub(crate) const PAGE_NEXT: Shortcut = Shortcut::cmd("→");
 
+/// Whether the editor offers the command to the user. The web build embeds the editor in Workspace,
+/// which sets the interface language, theme and the other settings itself, so it does not offer
+/// Preferences (fork change "preferences-hidden"). The desktop build offers every command.
+pub(crate) fn offered(id: &str) -> bool {
+    !(cfg!(target_arch = "wasm32") && id == "app.preferences")
+}
+
 /// Whether shortcuts are written the macOS way (`⇧⌘S`) rather than `Ctrl+Shift+S`. egui knows the
 /// platform from the build target, and on the web from the browser's user agent.
 pub(crate) fn mac_shortcuts(ctx: &egui::Context) -> bool {
@@ -159,6 +166,9 @@ impl PdfCraftApp {
 
     fn execute_unguarded(&mut self, id: &str) -> bool {
         let Some(spec) = commands::command(id) else { return false };
+        if !offered(id) {
+            return false;
+        }
         if !self.command_enabled(spec) {
             let why = self.disabled_reason(spec);
             self.notify(why);
@@ -810,7 +820,7 @@ impl PdfCraftApp {
         // Buttons also own keyboard focus for Tab/Enter activation, but they must not
         // suppress document shortcuts. Text editors retain their own undo/redo handling.
         let typing = ctx.text_edit_focused();
-        let mut specs: Vec<&CommandSpec> = COMMANDS.iter().filter(|c| c.shortcut.is_some()).collect();
+        let mut specs: Vec<&CommandSpec> = COMMANDS.iter().filter(|c| c.shortcut.is_some() && offered(c.id)).collect();
         specs.sort_by_key(|c| std::cmp::Reverse(c.shortcut.map(|s| s.modifier_count()).unwrap_or(0)));
         for spec in specs {
             let Some(s) = spec.shortcut else { continue };

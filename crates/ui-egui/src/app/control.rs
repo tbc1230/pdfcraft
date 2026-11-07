@@ -125,6 +125,7 @@ impl PdfCraftApp {
                     "enhance-scan" => Some(Dialog::EnhanceScan),
                     "js-console" => Some(Dialog::JsConsole),
                     "document-js" => Some(Dialog::DocumentJs),
+                    "preferences" if !crate::commands::offered("app.preferences") => return Err("Preferences are not offered in this build".into()),
                     "preferences" => Some(Dialog::Preferences),
                     "compare-files" => Some(Dialog::CompareFiles),
                     "action-wizard" => Some(Dialog::ActionWizard),
