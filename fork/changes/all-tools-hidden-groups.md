@@ -23,6 +23,8 @@ The product owner chose these tool groups to hide from All tools: `export` (Expo
 ## Not covered
 The hidden groups are still reachable outside All tools: the Convert tab opens Export (`select_mode` in `crates/ui-egui/src/app/commands.rs`), command search lists tool groups (`crates/ui-egui/src/dialogs/palette.rs`), the Tools menu (`crates/ui-egui/src/menus.rs`), the page context menu's Export PDF (`crates/ui-egui/src/canvas.rs`), the Edit panel's other tools and Home's pinned tools.
 
+The list was extended to 19 groups, and the Tools pane trimmed, by [interface-parts-hidden](/changes/interface-parts-hidden.md).
+
 ## Depends on upstream
 - The tool catalogue `TOOL_GROUPS` and its group ids (`crates/engine/src/catalog.rs`).
 - The All tools sidebar and expanded view iterate the catalogue in the two places above.

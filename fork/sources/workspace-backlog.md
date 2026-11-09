@@ -423,6 +423,7 @@ As a user, I want to go straight to a page I name, so that I can reach it withou
 Acceptance criteria:
 * Given a document of N pages is open, when the user goes to page k (k from 1 to N), then page k is brought into view.
 * Given page k is wider than the document view, when the user goes to page k, then page k is also brought into view horizontally.
+* Every criterion of this item is tested end to end in the Mock/Stub, with a document of several pages, one of them wider than the document view.
 
 ### Feature: Page stepping
 
@@ -434,6 +435,8 @@ As a user, I want to step one page forward or back, so that I can move through t
 Acceptance criteria:
 * Given page k is in view and is not the last page, when the user steps forward, then page k+1 is brought into view.
 * Given page k is in view and is not the first page, when the user steps back, then page k-1 is brought into view.
+* Stepping works with the editor's page controls, and with the keyboard after the user has clicked the pages.
+* Every criterion of this item is tested end to end in the Mock/Stub, with a document of several pages.
 
 ### Feature: Page labels
 
@@ -445,6 +448,8 @@ As a user, I want pages identified by the document's own page labels, so that th
 Acceptance criteria:
 * Given a document whose page labels are i and ii for the first two pages and 1 for the third page, when the editor shows the third page's number, then it shows 1.
 * Given a document without page labels, when the editor shows a page's number, then it shows the page's position in the document.
+* The page label is shown wherever the editor shows a page's number: the page box, the page thumbnails and the Organize pages view.
+* Every criterion of this item is tested end to end in the Mock/Stub, with a document labelled i, ii, 1 and a document without page labels.
 
 #### Story: See the page in view
 
@@ -467,6 +472,7 @@ Acceptance criteria:
 * Given a link whose destination is a position and zoom on a page, when the user follows it, then that page is displayed with the destination position at the top-left of the document view and the destination zoom applied.
 * Given a link whose destination is fit page, fit width or fit height, when the user follows it, then the destination page is displayed with that fit setting.
 * Bookmarks are handled by "Jump to a bookmark".
+* (added; hosting.md "State the client reads") Following a link does not change the document: `edit_generation` and `can_undo` are as before. Test: e2e.
 
 ## Epic: Present and print
 
@@ -497,6 +503,8 @@ Acceptance criteria:
 * Pages reach the browser's print dialog as images at the dpi steps and caps PdfCraft uses; this is accepted for review copies, and users who need higher quality take a copy away with "Download as PDF" and print elsewhere.
 * Given the browser refuses the print, then the user receives the print-ready PDF as a download instead.
 * Given the user has selected pages, when the user prints, then only the selected pages are printed.
+* (added; mods:216 and "Honour the restrictions set inside a PDF"; `chrome.rs:526-535`, engine `commands.rs:195`) Given the permissions do not allow printing the Print button is disabled with the editor's hover text, `runCommand("print.dialog")` returns `{ ok: false, error: "command print.dialog is not available now" }` and nothing prints. Test: e2e with the encrypted fixture (print bit cleared).
+* (added; hosting.md) A print that succeeds does not change the document: `edit_generation` and `can_undo` are as before; the fallback download changes neither and sends no `pdfcraft:save` event. Test: e2e.
 
 ## Epic: Find words quickly
 
@@ -516,6 +524,10 @@ Acceptance criteria:
 * The search is case-insensitive by default; the user can switch on a case-sensitive option, and then only matches with the same case are found.
 * The user can switch on a whole-word option, and then only matches that are whole words are found.
 * No other find option is offered.
+* (added; "List all matches") The number of results `edit.advanced_search` lists equals "n" of the find bar. Test: e2e, the "N instances" label and the rows.
+* (added; "Run commands from the client") The find bar opens with `runCommand("edit.find")` and typing works as by keyboard. Test: e2e.
+* (added; hosting.md) Searching does not change the document: `edit_generation` and `can_undo` as before. Test: e2e.
+* (added; `find.rs:120-135`) A page whose text arrives late is added to the count; the status ends without "+" and equals the number of pages that hold the word. Test: e2e, 100-page document.
 
 #### Story: Step through the matches
 
@@ -699,6 +711,12 @@ Acceptance criteria:
 * An added image is page content and has no explanation of its own; the reviewer explains it by placing a note ("Place a note at a point on a page") on or next to the image, which carries the explanation and appears in the comments panel.
 * Given a placed image, when the reviewer selects it later, then it can still be edited as stated in "Move and resize a placed object".
 * Added images are kept as stated in "Placed objects and corrections are kept in the saved document".
+* (added; code `content_ui.rs:915`; "Run commands from the client": the editor offers commands that apply to working in Workspace) In the web build, Add image (the Edit panel row, command search) opens the browser's file chooser for an image and, once a file is chosen, places it; the message at `content_ui.rs:915` is shown nowhere. Test: e2e as above; `runCommand("edit.image")` is accepted but cannot open a chooser without a user gesture (Playwright clicks carry one, `page.evaluate` does not, inference), so only acceptance is checked for that path. The placement itself: fork test `tests/it/content.rs`, `add_image("p.png", bytes)` on a one-page document gives one added image on page 0 and `can_undo` true.
+* (added; "Honour the restrictions set inside a PDF", mods:707-716) Given the document's permissions do not allow modification, Add image is unavailable and `runCommand("edit.image")` returns `{ ok: false, error: "command edit.image is not available now" }`. Test: e2e with `pdfs.build(encrypt=(owner, user, P))` with the modify bit cleared.
+* (added; hosting.md, "State the client reads") After the placement `getState().can_undo` is true and `edit_generation` differs; one `runCommand("edit.undo")` removes the image. Test: e2e.
+* (added; product owner, 2026-11-08; as "Place the drawn signature image") After a file is chosen, the editor shows the image at the pointer at its natural size, and the reviewer's click on a page places it at that spot; given the reviewer cancels before clicking, nothing is placed and the document is unchanged. Test: e2e; screenshot region check at the click point; Esc before the click leaves `edit_generation` unchanged.
+* (added; product owner, 2026-11-08; backlog "the accepted image formats are those the editor can place") The file chooser offers only the image formats the editor can place; a file in another format, such as DICOM, cannot be chosen. Test: e2e; the accept list of the chooser's input.
+* (added; failure) A file that is not an image or cannot be read changes nothing (`edit_generation`, `can_undo` as before). The editor reports the failure as it reports any other failed edit (product owner, 2026-11-08). Test: e2e with a text file named `x.png`.
 
 ### Feature: Custom marks
 
@@ -1005,12 +1023,18 @@ Component: PdfCraft fork
 As a Workspace user, I want to delete one page or a selection of pages, so that the document contains only the pages I need.
 Acceptance criteria:
 * Given the Organize pages view of a 5-page document, when the user deletes page 2, then the document has 4 pages and the former pages 3 to 5 become pages 2 to 4.
-* Given the user has selected pages 2 and 4 by click, Command-click or Shift-click, when the user deletes the selection, then the document has 3 pages and pages 2 and 4 are no longer in it.
+* Given the user has selected pages 2 and 4 by click and Command-click, when the user deletes the selection, then the document has 3 pages and pages 2 and 4 are no longer in it.
 * Given a bookmark that opens page 4, when page 4 is deleted, then the bookmark no longer has a destination that points at the deleted page.
 * Given a deleted page carried markup, when the page is deleted, then its markup is handled as defined in "Markup stays on its page when pages are moved, inserted or deleted".
 * No confirmation is asked before pages are deleted; "Undo and redo page changes" and "Open an earlier version" are the protection.
 * Given the selection includes every page of the document, when the user tries to delete it, then delete is unavailable and the user is told that at least one page must remain; a document with no pages is not allowed.
 * Pages picked in the Pages panel stay selected after the panel is closed.
+* (added; "Run commands from the client": a command not available in the current state is refused with its reason; `commands.rs:180-203`) `runCommand("page.delete")` with every page selected, and with no selection in a one-page document, returns `{ ok: false, error }` with a reason and the document is unchanged. Test: e2e both cases. One arm in `command_enabled` serves every surface.
+* (added; `canvas.rs:905`) In a one-page document the page context menu entry is disabled; in a document of several pages it deletes the clicked page. Test: e2e.
+* (added; "Report the page count to the client") After a delete `getState().page_count` is the new count and one `pdfcraft:state` was sent. Test: e2e.
+* (added; "Undo and redo page changes": deleting pages 2 and 4 in one change, one undo brings both back) Deleting a selection is one undo step. Test: e2e, undo once gives 5 pages with the original ratios.
+* (added; "Honour the restrictions set inside a PDF") Given the permissions do not allow assembly, delete is unavailable on every surface and the command is refused with a reason. Test: e2e with the encrypted fixture.
+* (added; "Hide upstream functions that overlap Workspace concerns") Delete is enabled and disabled in the same states on the Pages panel, the Organize grid, the Organize pages panel, the context menu, command search and the keys. Test: e2e, one page selected and all pages selected.
 
 ### Feature: Undo page changes
 
@@ -1039,6 +1063,11 @@ As a Workspace user, I want to insert a blank page, so that I have room in the d
 Acceptance criteria:
 * Given a document of N pages, when the user inserts one blank page, then the document has N+1 pages and the new page has no content.
 * Given a blank page has been inserted, when the user undoes, then the document has N pages again as defined in "Undo and redo page changes".
+* (added; code `commands.rs:503-510`) The new page follows the last selected page, or the current page when none is selected, and has that page's size. Test: e2e with pages of distinct ratios and page 2 current.
+* (added; "Run commands from the client": a command run through the function changes the document exactly as the same action inside the editor does) `runCommand("page.insert_blank")` and the editor's own entries give the same result. Test: e2e, both paths.
+* (added; "Report the page count to the client") `getState().page_count` is N+1 and one `pdfcraft:state` was sent. Test: e2e.
+* (added; "Honour the restrictions set inside a PDF") Given the permissions do not allow assembly, the command is refused with its reason and the entries are unavailable. Test: e2e with the encrypted fixture.
+* (added; "Save and return the bytes to the client") The bytes returned by `save()` reopen with N+1 pages. Test: e2e, `pages_on_screen` after reopening.
 
 #### Story: Insert pages from another PDF
 
@@ -1069,6 +1098,10 @@ Acceptance criteria:
 * Given text is selected on a page, when the user adds a bookmark, then the bookmark is titled with the selected text on one line, at most 128 characters, and it opens the page at the top-left of the selection.
 * Given a bookmark has just been added, when the Bookmarks panel shows it, then its title is open for renaming as defined in "Rename a bookmark".
 * Given the document permissions do not allow assembly or the document is read-only, when the user tries to add a bookmark, then the action is unavailable.
+* (added; "Run commands from the client") `runCommand("bookmark.add")`, the panel button and Ctrl+B make the same bookmark (title and destination). Test: e2e.
+* (added; "Save and return the bytes to the client", mods:`Save and return`: every edit made up to the call) `save()` bytes contain the outline entry with the title; reopening them lists it. Test: e2e.
+* (added; hosting.md "State the client reads") After the add `edit_generation` differs, `can_undo` is true and one undo removes the bookmark. Test: e2e.
+* (added; "Hide upstream functions that overlap Workspace concerns": the same commands on every surface) New bookmark is available on the menu, the panel, the page context menu, command search and the shortcut, and on none of them when unavailable. Test: e2e, `palette_labels` (`workspace/tests/helpers.py`) and the buttons.
 
 #### Story: Rename a bookmark
 
@@ -1078,6 +1111,10 @@ As a Workspace user, I want to give a bookmark a name of my own, so that I recog
 Acceptance criteria:
 * Given a bookmark in the Bookmarks panel, when the user starts renaming it, then its whole current title is selected, so typing replaces it.
 * Given the user has typed a new title and confirmed it, when the Bookmarks panel is shown, then the bookmark has the new title and still opens the same page.
+* (added; criterion 1 and item 5) The selection rule holds for all three starts: after an add, from the row's menu, by double-click. Test: fork test, three starts.
+* (added; mods:707-716; `panels/bookmarks.rs:213, 216`) Given the permissions do not allow assembly, the menu entry and the double-click do not start a rename. Test: fork test with an outlined PDF protected with the assembly bit cleared (pattern `crates/engine/src/tests.rs:2375`, built in the test); no e2e, because the encrypted fixture cannot hold an outline title (`workspace/tests/pdfs.py:45-51`).
+* (added; code `panels/bookmarks.rs:156-169`, current behaviour kept) Escape cancels and the title is unchanged; an empty title leaves the old one; the confirmed title is trimmed. Test: `tests/it/bookmarks.rs:123` and cases for empty and padded titles.
+* (added; hosting.md) The rename is one undo step; `save()` bytes hold the new title. Test: e2e.
 
 #### Story: Jump to a bookmark
 
@@ -1568,6 +1605,16 @@ The fork exports a function that inserts the pages of another PDF passed as byte
 Acceptance criteria:
 * The exported JS API has a function that takes the bytes of another PDF and inserts its pages into the open document as "Insert pages from another PDF" defines.
 * The function produces the bookmark behaviour of "Insert pages from another PDF"; no fork change alters that behaviour.
+* (added; host-api.md pattern; hosting.md "Open a document") The function returns a Promise of `{ ok: true }` or `{ ok: false, error }` with the editor's error text unchanged, never rejects; the number of inserted pages is obtainable by the client (wb:242), as a field of the result or as the difference of `page_count`; the implementer chooses and records it. Test: e2e.
+* (added; "Save and return the bytes to the client") Given no document is open the result is a failure that says so. Test: e2e.
+* (added; `files.rs:635`) Given the bytes are not a PDF or cannot be read (empty, random or truncated), the result is a failure with the error text and the document is unchanged (`page_count`, `edit_generation`, `can_undo`). Test: e2e.
+* (added; product owner, 2026-11-08; "Report why a document could not be opened", "Enter a password for a protected document") The function takes an optional password for the other PDF. Given the other PDF needs a password and none or a wrong one is given, the result is a "password required" failure, distinct from every other failure, and the document is unchanged; Workspace asks the user for the password and calls the function again. With the right password the pages are inserted. The password is used only by the editor and appears in no request, result, console message or state event. Test: e2e with an other PDF that has a user password: without it, with a wrong one, with the right one.
+* (added; "Honour the restrictions set inside a PDF"; `edit/run.rs:13-36`) Given the document's permissions do not allow assembly the result is a failure with the reason and the document is unchanged. Test: e2e with the encrypted fixture (assemble bit cleared).
+* (added; "Report the page count to the client") After the call `getState().page_count` is N+M, `pdfcraft:state` was sent once, and `getState().info` (title, author, subject, keywords) is the open document's, not the other PDF's. Test: e2e; the other PDF has a title (`build(title=...)`).
+* (added; "Undo and redo page changes") The insertion is one undo step: one `runCommand("edit.undo")` returns N pages. Test: e2e.
+* (added; `files.rs:660-664`) After the call the inserted pages are the selected pages, as after the editor's own insert. Test: e2e, `docInspect().active.selected_pages`.
+* (added; "Hide upstream interface parts") The call opens no file chooser and no dialog. Test: e2e, `page.on("filechooser")` records none.
+* (added; "Keep fork changes to what Workspace needs") The editor makes no request to the fileserver during the call. Test: e2e, the call record.
 
 #### Technical story: Save and return the bytes to the client
 
@@ -1578,6 +1625,13 @@ Acceptance criteria:
 * The exported JS API has a function that saves the open document and returns its bytes to the client.
 * The returned bytes are a PDF document that contains every edit made in the editor up to the call.
 * The editor sends the bytes nowhere; the client sends them to the backend as "Store saved bytes on the fileserver" defines.
+* The editor offers no Save and no Save As command: neither is shown in its menus, toolbars or command search, nor run by a keyboard shortcut. Saving is done with Workspace's buttons outside the editor: Save, which overwrites the current version ("Save changes to the fileserver"), Save as a Version ("Save as a Version") and Download ("Download as PDF"); each obtains the bytes through this function.
+* The function is available to a page that does not opt in to the page command API (`?control`).
+* Given no document is open, the call returns a failure result that says so, and no bytes.
+* Given the editor cannot produce the bytes, the call returns a failure result with the editor's error text, so that the client reports "the editor did not return the document" ("Report the outcome of a save").
+* The result carries the edit_generation value the returned bytes correspond to, so that the client shows unsaved changes as "Show whether the document has unsaved changes" defines, also when the backend does not accept the write.
+* The editor gives the client saved bytes only through this function: it starts no download of the saved document and sends no other save message (`pdfcraft:save`). The print-ready PDF that "Print the document" downloads when the browser refuses the print is not the saved document.
+* Every criterion of this item is tested end to end in the Mock/Stub, with the function called on a page opened without `?control`.
 
 #### Technical story: Run commands from the client
 
@@ -1588,6 +1642,12 @@ Acceptance criteria:
 * The exported JS API has a function that runs an editor command identified by the client, backed by PdfCraftApp::run_command.
 * Every editing action that an item of this backlog requires Workspace to trigger from outside the editor is runnable through this function.
 * A command run through this function changes the document and the editor state exactly as the same action taken inside the editor does.
+* The editor offers only commands that apply to working in Workspace. Commands that belong to the stand-alone application are not shown in command search ("Find tools and commands") or anywhere else in the editor, enabled or disabled; among them: New blank PDF, Create PDF from file, Create PDF from Multiple Files, Open Recent, Clear Recent Files, Pin Folder to Home and Tab Order.
+* The function is available to a page that does not opt in to the page command API (`?control`).
+* The result tells the client whether the command ran; an unknown command, a command the editor does not offer and a command not available in the current state are refused, each with its reason.
+* The editing actions Workspace triggers through this function are undo and redo ("Use the editor state for controls outside the editor"); the other actions Workspace triggers from outside the editor have their own functions in the feature "Exported JS API".
+* A command the editor does not offer is shown nowhere in it: not in its menus, toolbars, hotbar, context menus or command search, and no keyboard shortcut runs it. The commands that change what Workspace sets, the interface language and the theme, are not offered either.
+* Every criterion of this item is tested end to end in the Mock/Stub; each command not offered is checked in command search, the menus, the hotbar and the context menus.
 
 #### Technical story: Place the drawn signature image
 
@@ -1602,6 +1662,13 @@ Acceptance criteria:
 * The placement is one step in the editor's undo history: after the click, can_undo is true, and undo removes the placed image from the page.
 * The placed image can be moved and resized as "Move and resize a placed object" defines, with corner handles that keep its proportions.
 * Given the user cancels before clicking, then nothing is placed and the document is unchanged.
+* (added; the pattern of `fork/changes/host-api.md`) The function returns a Promise of `{ ok: true }` or `{ ok: false, error }`, never rejects; `ok` means the placement started. Test: e2e.
+* (added; mods:855, `edit/run.rs:766-777`) Natural size is pixels * 72 / dpi (72 dpi without one), within 80 percent of the page; the preview and the placed image have the same size. Test: e2e with the 480 x 180 px PNG; fork test for the size rule.
+* (added; mods:431, 444, 855) The placed image is an added image: it has no comments panel entry and is moved and resized as an added image. Test: e2e, comments panel rows unchanged after the placement.
+* (added; "Save and return the bytes to the client": no document open) Given no document is open the result is a failure that says so and nothing starts. Test: e2e before any document is opened.
+* (added; "Honour the restrictions set inside a PDF") Given the document's permissions do not allow the change (the modify bit for `Edit::AddImage`), the result is a failure with the reason. Test: e2e with the encrypted fixture.
+* (added; failure pattern) Bytes that are not an image, an empty array or an oversized image give `{ ok: false, error }` with the editor's text, nothing starts, `edit_generation` is unchanged. Test: e2e.
+* (added; hosting.md, "State the client reads") After the click `edit_generation` differs and `pdfcraft:state` was sent once for it. Test: e2e, event count.
 
 #### Technical story: Place an image from bytes
 
@@ -1682,6 +1749,11 @@ Acceptance criteria:
 * is_signed reports whether the open document is signed: true for a document carrying a digital signature, false for a document carrying no signature.
 * When a different document is opened in the editor, then the values returned are those of the newly opened document.
 * A further state value that an item of this backlog needs for a Workspace control is added through an item with Component "Workspace and PdfCraft fork".
+* These values, the page count of "Report the page count to the client" and the document information of "Report the document information to the client" are available to the client in one call, to a page that does not opt in to the page command API (`?control`).
+* The editor tells the client each time one of these values changes, so that the client needs no polling; when no value changed, the editor tells the client nothing.
+* The fork adds no second way to read these values: the page count and the document information the fork added to the `?control` functions (`docInspect`, `documentInfo`) are removed.
+* permissions has a value for every open document, also for a document that sets no restrictions.
+* Every criterion of this item is tested end to end in the Mock/Stub, on a page opened without `?control`.
 
 ### Feature: Workspace controls driven by editor state
 
@@ -1754,6 +1826,11 @@ Acceptance criteria:
 * The Tools and Inspector panels are shown only as far as actions that items of this backlog define need them.
 * The Fields panel is not shown until an item of this backlog defines a form-filling capability; form fields stay interactive on the editing canvas.
 * The interface language is set by Workspace through "Set the interface language of the editor".
+* No hidden part can be opened from anywhere in the editor: not from its menus, toolbars, hotbar, tabs, context menus, command search or keyboard shortcuts.
+* The editor never shows or enters the All tools catalogue, also not when it starts.
+* Given no document is open, the editor shows an empty page area with no actions and no messages; what is opened, and every message about it, is Workspace's.
+* Each tool group the Tools panel shows is used by an action an item of this backlog defines; the change record names that item for each group.
+* Every criterion of this item is tested end to end in the Mock/Stub.
 
 ## Epic: Change the editor only where Workspace needs it
 

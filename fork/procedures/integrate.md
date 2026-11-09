@@ -25,9 +25,11 @@ Run from the repository root, after all workers have finished (any build compile
 A failure that also occurs on `main` (upstream) is not a worker's; note it in the log and go on.
 
 ## 3. WASM build
-Build PdfCraft's web app (`apps/pdfcraft-web`) into the Mock/Stub, which lives outside this repository in `D:\tmp\aac\pdfcraft-main\workspace`:
+Build PdfCraft's web app (`apps/pdfcraft-web`) into the Mock/Stub, which lives outside this repository in `D:\tmp\aac\pdfcraft-main\workspace`. The build carries the translations, so it sets `CRAFT_I18N_DIR` to the craft-i18n checkout and `CRAFT_I18N_REQUIRED=1` (see `.claude/CLAUDE.md`); without `CRAFT_I18N_DIR` the build is English only. It also carries the craft-fonts interface faces, so it sets `CRAFT_FONTS_DIR` to the craft-fonts checkout `D:\tmp\aac\pdfcraft-main\craft-fonts` and `CRAFT_FONTS_REQUIRED=1`; without them the WASM has no Arabic face and draws every Arabic letter unjoined ([Issues](/issues.md), Issue 3). In PowerShell:
 
 ```
+$env:CRAFT_I18N_DIR = 'D:\tmp\aac\pdfcraft-main\craft-i18n'; $env:CRAFT_I18N_REQUIRED = '1'
+$env:CRAFT_FONTS_DIR = 'D:\tmp\aac\pdfcraft-main\craft-fonts'; $env:CRAFT_FONTS_REQUIRED = '1'
 trunk --config D:/tmp/aac/pdfcraft-main/pdfcraft/apps/pdfcraft-web/Trunk.toml build --release --filehash false --dist D:/tmp/aac/pdfcraft-main/workspace/pkg --public-url /pkg/
 ```
 
