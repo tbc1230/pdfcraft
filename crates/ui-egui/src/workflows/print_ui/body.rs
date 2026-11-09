@@ -1,8 +1,27 @@
 use super::draft::{Handling, PrintDraft, Which};
 use super::{
-    Binding, BookletSubset, Color32, Content, Orientation, PAPERS, PREVIEW_BOX, PREVIEW_H, PREVIEW_W, PageOrder, Pos2, Rect, SizeMode, Stroke,
-    Subset, Tokens, pos2, print, printer_label, spool, still_looking, theme, vec2, widgets,
+    Binding, BookletSubset, COMPACT_BELOW, Color32, Content, DIALOG_CHROME_H, DIALOG_MIN_SCROLL, Orientation, PAPERS, PREVIEW_BOX, PREVIEW_H,
+    PREVIEW_W, PageOrder, Pos2, Rect, SETTINGS_W, SizeMode, Stroke, Subset, TWO_COLUMNS_FROM, Tokens, dialog_width, pos2, print, printer_label,
+    spool, still_looking, theme, vec2, widgets,
 };
+
+/// The dialog's body in a vertical scroll, so the Print and Cancel row below it stays in view
+/// (the Preferences dialog's way, `preferences_scroll`). The scroll is asked to take the whole
+/// of `max` whenever the body overflows it: a scroll area otherwise starts from the room the
+/// modal offers and the modal offers more each frame, so the dialog would grow after it opens.
+/// The scrollbar floats, so it takes no width from the two columns.
+fn scrolled_body(ui: &mut egui::Ui, max: f32, layout: egui::Layout, add_contents: impl FnOnce(&mut egui::Ui)) {
+    ui.scope(|ui| {
+        // Both axes scroll: a vertical-only area grows sideways to fit a control wider than the dialog,
+        // and the card with it. The columns have widths of their own, so their rows still wrap.
+        if ui.style().scroll_animation != egui::style::ScrollAnimation::none() {
+            ui.style_mut().scroll_animation = egui::style::ScrollAnimation::duration(0.25);
+        }
+        egui::ScrollArea::both().id_salt("print-dialog-scroll").auto_shrink([false, true]).max_height(max).min_scrolled_height(max).show(ui, |ui| {
+            ui.with_layout(layout, add_contents);
+        });
+    });
+}
 
 /// Properties… on CUPS: the driver's options for this print, grouped as the driver groups them.
 /// Only choices away from the printer's defaults are kept, and sent with the job.
@@ -89,18 +108,34 @@ pub(crate) fn body(
     labels: &[String],
     thumb: &mut dyn FnMut(usize) -> Option<egui::TextureId>,
 ) -> (bool, bool) {
-    ui.set_width(820.0);
+    // Never wider or taller than the editor area: 820 points where it is wider, and the body
+    // scrolls in what is left of the height after the title and the Print and Cancel row.
+    let width = dialog_width(ui.ctx());
+    let area = ui.ctx().content_rect();
+    ui.set_width(width);
     ui.label(egui::RichText::new(tl!("Print")).font(theme::semibold(18.0)));
     ui.add_space(8.0);
     let settings = d.settings(sizes.len(), labels);
     let sheets = settings.as_ref().ok().and_then(|s| print::layout(sizes, s).ok()).unwrap_or_default();
     d.sheet = d.sheet.min(sheets.len().saturating_sub(1));
-    ui.horizontal_top(|ui| {
+    // Two columns where the area is wide enough, the preview under the settings where it is not.
+    let two_columns = area.width() >= TWO_COLUMNS_FROM;
+    let settings_w = if two_columns { SETTINGS_W } else { width.min(SETTINGS_W) };
+    let preview_w = if two_columns { PREVIEW_W } else { width.clamp(40.0, PREVIEW_W) };
+    let compact = settings_w < COMPACT_BELOW;
+    // A control no wider than the settings column.
+    let fit = |w: f32| w.min(settings_w).max(50.0);
+    let layout = if two_columns { egui::Layout::left_to_right(egui::Align::Min) } else { egui::Layout::top_down(egui::Align::Min) };
+    let max_scroll = (area.height() - DIALOG_CHROME_H).max(DIALOG_MIN_SCROLL);
+    scrolled_body(ui, max_scroll, layout, |ui| {
         // Settings.
         ui.vertical(|ui| {
-            ui.set_width(470.0);
+            ui.set_width(settings_w);
             egui::Grid::new("print-top").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                 let printer_caption = ui.label(tl!("Printer:"));
+                if compact {
+                    ui.end_row();
+                }
                 let before = d.printer.clone();
                 // The browser's print dialog sets copies, two-sided printing and colour itself.
                 let browser = d.printer.as_deref() == Some(crate::web_print::BROWSER_PRINTER);
@@ -110,7 +145,9 @@ pub(crate) fn body(
                         None if still_looking(d) => tl!("Looking for printers…").to_string(),
                         None => tl!("Save as PDF").to_string(),
                     };
-                    craft_ui::ComboBox::from_id_salt("printer").selected_text(shown).width(260.0).show_ui(ui, |ui| {
+                    // Beside the Properties button, which keeps its own width.
+                    let printer_w = if compact { (settings_w - 110.0).clamp(60.0, 260.0) } else { 260.0 };
+                    craft_ui::ComboBox::from_id_salt("printer").selected_text(shown).width(printer_w).show_ui(ui, |ui| {
                         if d.printers_loading {
                             ui.add_enabled(false, egui::Label::new(tl!("Looking for printers…")));
                         }
@@ -163,7 +200,9 @@ pub(crate) fn body(
                 // The spooler answered with no printer at all (#160): say so, rather than
                 // leaving Save as PDF looking like the only thing PdfCraft can do.
                 if !d.printers_loading && d.printers.is_empty() {
-                    ui.label("");
+                    if !compact {
+                        ui.label("");
+                    }
                     ui.label(
                         egui::RichText::new(tl!("No printers were found. Check that the printer is installed and the print spooler is running, then open Print again."))
                             .small()
@@ -172,8 +211,11 @@ pub(crate) fn body(
                     ui.end_row();
                 }
                 let copies_label = ui.label(tl!("Copies:"));
+                if compact {
+                    ui.end_row();
+                }
                 ui.add_enabled_ui(!browser, |ui| {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.add(egui::DragValue::new(&mut d.copies).range(1..=999)).labelled_by(copies_label.id);
                         ui.add(widgets::checkbox(&mut d.collate, tl!("Collate")));
                         ui.add(widgets::checkbox(&mut d.grayscale, tl!("Print in grayscale")));
@@ -184,6 +226,9 @@ pub(crate) fn body(
                 // in Acrobat's Print dialog; it is kept for the other layouts.
                 if d.handling != Handling::Booklet {
                     ui.label(tl!("Two-sided:"));
+                    if compact {
+                        ui.end_row();
+                    }
                     ui.add_enabled_ui(!browser, |ui| {
                         combo(
                             ui,
@@ -196,15 +241,18 @@ pub(crate) fn body(
                                 (Some(spool::Duplex::LongEdge), tl!("Flip on long edge")),
                                 (Some(spool::Duplex::ShortEdge), tl!("Flip on short edge")),
                             ],
-                            160.0,
+                            fit(160.0),
                         );
                     });
                     ui.end_row();
                 }
                 let paper_label = ui.label(tl!("Paper:"));
+                if compact {
+                    ui.end_row();
+                }
                 let paper_name = PAPERS.get(d.paper).map_or("US Letter", |p| p.0);
                 let before = d.paper;
-                craft_ui::ComboBox::from_id_salt("paper").selected_text(tl!(paper_name)).width(260.0).show_ui(ui, |ui| {
+                craft_ui::ComboBox::from_id_salt("paper").selected_text(tl!(paper_name)).width(fit(260.0)).show_ui(ui, |ui| {
                     for (i, (name, _)) in PAPERS.iter().enumerate() {
                         ui.selectable_value(&mut d.paper, i, tl!(name));
                     }
@@ -258,7 +306,7 @@ pub(crate) fn body(
             }
             ui.add_space(6.0);
             widgets::section_title(ui, tl!("Pages to Print"));
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 widgets::radio_value(ui, &mut d.which, Which::All, tl!("All"));
                 widgets::radio_value(ui, &mut d.which, Which::Current, tl!("Current page"));
                 let pages = widgets::radio_value(ui, &mut d.which, Which::Range, tl!("Pages"));
@@ -275,7 +323,7 @@ pub(crate) fn body(
                 let label = format!("{} ({})", tl!("Selected pages"), d.selected.len());
                 widgets::radio_value(ui, &mut d.which, Which::Selected, label);
             }
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(tl!("More options:"));
                 combo(
                     ui,
@@ -305,12 +353,12 @@ pub(crate) fn body(
             ui.add_space(4.0);
             match d.handling {
                 Handling::Size => {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         widgets::radio_value(ui, &mut d.size, SizeMode::Fit, tl!("Fit"));
                         widgets::radio_value(ui, &mut d.size, SizeMode::Actual, tl!("Actual size"));
                         widgets::radio_value(ui, &mut d.size, SizeMode::Shrink, tl!("Shrink oversized pages"));
                     });
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let custom = matches!(d.size, SizeMode::Custom(_));
                         if ui.add(widgets::radio(custom, tl!("Custom scale:"))).clicked() {
                             d.size = SizeMode::Custom(d.custom_scale);
@@ -328,7 +376,7 @@ pub(crate) fn body(
                     );
                 }
                 Handling::Poster => {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let scale_label = ui.label(tl!("Tile scale:"));
                         ui.add(egui::DragValue::new(&mut d.poster_scale).range(10.0..=1000.0).suffix(" %")).labelled_by(scale_label.id);
                         let overlap_label = ui.label(tl!("Overlap:"));
@@ -337,7 +385,7 @@ pub(crate) fn body(
                     });
                 }
                 Handling::Multiple => {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(tl!("Pages per sheet:"));
                         combo(ui, "per-sheet", tl!("Pages per sheet:"), &mut d.per_sheet, &[(2, "2"), (4, "4"), (6, "6"), (9, "9"), (16, "16")], 60.0);
                         ui.label(tl!("Page order:"));
@@ -356,7 +404,7 @@ pub(crate) fn body(
                             150.0,
                         );
                     });
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.add(widgets::checkbox(&mut d.border, tl!("Print page border")));
                         ui.add(widgets::checkbox(&mut d.auto_rotate, tl!("Auto-rotate pages")));
                     });
@@ -367,7 +415,7 @@ pub(crate) fn body(
                     }
                 }
                 Handling::Booklet => {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(tl!("Booklet subset:"));
                         combo(
                             ui,
@@ -387,7 +435,7 @@ pub(crate) fn body(
                 }
             }
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(tl!("Orientation:"));
                 widgets::radio_value(ui, &mut d.orientation, Orientation::Auto, tl!("Auto portrait/landscape"));
                 widgets::radio_value(ui, &mut d.orientation, Orientation::Portrait, tl!("Portrait"));
@@ -406,7 +454,7 @@ pub(crate) fn body(
                     (Content::DocumentAndStamps, tl!("Document and stamps")),
                     (Content::FormFieldsOnly, tl!("Form fields only")),
                 ],
-                220.0,
+                fit(220.0),
             );
             // Advanced (Acrobat's Advanced Print Setup): print as image. Folded unless it is on.
             ui.add_space(6.0);
@@ -414,7 +462,7 @@ pub(crate) fn body(
                 .id_salt("print-advanced")
                 .default_open(d.as_image)
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.add(widgets::checkbox(&mut d.as_image, tl!("Print as image")));
                         ui.add_enabled_ui(d.as_image, |ui| {
                             ui.label(tl!("Resolution:"));
@@ -435,15 +483,18 @@ pub(crate) fn body(
         ui.add_space(12.0);
         // Preview.
         ui.vertical(|ui| {
-            ui.set_width(PREVIEW_W);
-            let (area, _) = ui.allocate_exact_size(vec2(PREVIEW_W, PREVIEW_H), egui::Sense::hover());
+            ui.set_width(preview_w);
+            // Under the settings in a narrow area the pane shrinks to the width there is, with the
+            // paper's room inside it (`preview_k` is 1 at the full size).
+            let preview_k = preview_w / PREVIEW_W;
+            let (area, _) = ui.allocate_exact_size(vec2(preview_w, PREVIEW_H * preview_k), egui::Sense::hover());
             ui.painter().rect_filled(area, 6.0, t.hover);
             match (&settings, sheets.get(d.sheet)) {
                 (Err(e), _) => {
                     ui.put(area.shrink(16.0), egui::Label::new(egui::RichText::new(tl!(e)).color(t.text_muted)).wrap());
                 }
                 (Ok(_), Some(sheet)) => {
-                    let k = (PREVIEW_BOX.0 / sheet.size.0 as f32).min(PREVIEW_BOX.1 / sheet.size.1 as f32);
+                    let k = (PREVIEW_BOX.0 * preview_k / sheet.size.0 as f32).min(PREVIEW_BOX.1 * preview_k / sheet.size.1 as f32);
                     let paper = Rect::from_center_size(area.center(), vec2(sheet.size.0 as f32 * k, sheet.size.1 as f32 * k));
                     ui.painter().rect_filled(paper, 0.0, Color32::WHITE);
                     ui.painter().rect_stroke(paper, 0.0, Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
@@ -526,7 +577,9 @@ pub(crate) fn body(
                     ui.label(crate::i18n::fmt(tl!("PDF scale: {scale}%"), &[("scale", &format!("{scale:.2}"))]));
                     ui.label(egui::RichText::new(tl!("Printer paper and scaling may differ. Check driver settings.")).small().color(t.text_muted));
                     if (scale - 100.0).abs() > 0.01 {
-                        ui.label(egui::RichText::new(tl!("Drawing scale changes. Use Actual size for full-scale plans.")).small().color(t.text_muted));
+                        ui.label(
+                            egui::RichText::new(tl!("Drawing scale changes. Use Actual size for full-scale plans.")).small().color(t.text_muted),
+                        );
                     }
                 }
             }

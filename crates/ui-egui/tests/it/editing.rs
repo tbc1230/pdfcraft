@@ -10018,3 +10018,68 @@ fn page_changes_are_refused_without_the_assembly_permission() {
     }
     assert_eq!(page_sizes(h.state()).len(), 3);
 }
+
+/// A rectangle markup item on page 1 of the editing fixture.
+fn add_rectangle(app: &mut PdfCraftApp, x: f64) -> bool {
+    let shape = pdfcraft_engine::Shape::Rectangle { rect: [x, 10.0, x + 40.0, 50.0] };
+    let style = pdfcraft_engine::Style::default_for(&shape);
+    app.apply_edit(pdfcraft_engine::Edit::AddAnnotation(pdfcraft_engine::NewAnnotation {
+        page: 0,
+        shape,
+        style,
+        contents: String::new(),
+        author: String::new(),
+    }))
+}
+
+fn can_redo(h: &Harness<'static, PdfCraftApp>) -> bool {
+    h.state().host_state_snapshot()["can_redo"] == serde_json::json!(true)
+}
+
+fn can_undo(h: &Harness<'static, PdfCraftApp>) -> bool {
+    h.state().host_state_snapshot()["can_undo"] == serde_json::json!(true)
+}
+
+fn command_enabled(h: &Harness<'static, PdfCraftApp>, id: &str) -> bool {
+    let spec = pdfcraft_engine::commands::command(id).expect("registered command");
+    pdfcraft_engine::commands::is_enabled(spec, &h.state().session, Some(h.state().views[0].id))
+}
+
+/// "Undo and redo markup changes": a new markup change after an undo removes what could be
+/// redone, so `can_redo` is false and `edit.redo` is not available (the host API then refuses it
+/// with "command edit.redo is not available now": `host_calls::run_command_refuses_...`).
+#[test]
+fn a_new_markup_change_after_an_undo_clears_redo() {
+    let mut h = harness(1, |_| {});
+    assert!(add_rectangle(h.state_mut(), 20.0));
+    h.run_steps(2);
+    h.state_mut().undo();
+    h.run_steps(2);
+    assert!(can_redo(&h), "an undone markup change can be redone");
+    assert!(command_enabled(&h, "edit.redo"));
+    assert!(add_rectangle(h.state_mut(), 100.0));
+    h.run_steps(2);
+    assert!(!can_redo(&h), "a new change drops the redo");
+    assert!(!command_enabled(&h, "edit.redo"), "edit.redo is not available now");
+    assert!(can_undo(&h));
+}
+
+/// With nothing to undo or redo, both commands are not available.
+#[test]
+fn undo_and_redo_are_not_available_when_there_is_nothing_to_undo_or_redo() {
+    let mut h = harness(1, |_| {});
+    assert!(!can_undo(&h) && !can_redo(&h));
+    assert!(!command_enabled(&h, "edit.undo"), "nothing to undo");
+    assert!(!command_enabled(&h, "edit.redo"), "nothing to redo");
+    assert!(add_rectangle(h.state_mut(), 20.0));
+    h.run_steps(2);
+    assert!(command_enabled(&h, "edit.undo"));
+    assert!(!command_enabled(&h, "edit.redo"));
+    h.state_mut().undo();
+    h.run_steps(2);
+    assert!(!command_enabled(&h, "edit.undo"), "everything is undone");
+    assert!(command_enabled(&h, "edit.redo"));
+    h.state_mut().redo();
+    h.run_steps(2);
+    assert!(command_enabled(&h, "edit.undo") && !command_enabled(&h, "edit.redo"));
+}

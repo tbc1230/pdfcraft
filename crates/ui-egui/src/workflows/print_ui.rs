@@ -22,6 +22,29 @@ const PREVIEW_W: f32 = 320.0;
 const PREVIEW_H: f32 = 380.0;
 const PREVIEW_INSET: f32 = 12.0;
 pub(crate) const PREVIEW_BOX: (f32, f32) = (PREVIEW_W - 2.0 * PREVIEW_INSET, PREVIEW_H - 2.0 * PREVIEW_INSET);
+/// The dialog's content width where the editor area allows it, and the room the card's padding
+/// and outline take (2 x 20 pt padding, the outline, a little to spare).
+const DIALOG_W: f32 = 820.0;
+const DIALOG_CHROME_W: f32 = 48.0;
+/// From this editor area width up the preview sits beside the settings; below it, under them.
+const TWO_COLUMNS_FROM: f32 = 860.0;
+/// What the card takes besides the scrolling body: padding and outline, the title, the Print and
+/// Cancel row and the gaps between them.
+const DIALOG_CHROME_H: f32 = 150.0;
+/// The body is never given less than this to scroll in, however small the area.
+const DIALOG_MIN_SCROLL: f32 = 24.0;
+/// The settings column's width beside the preview, and at most its width when the preview is
+/// under it.
+const SETTINGS_W: f32 = 470.0;
+/// Below this width the settings put each caption above its control.
+const COMPACT_BELOW: f32 = 430.0;
+
+/// The width of the Print dialog's content: 820 points, or less where the editor area is
+/// narrower, so the card never lies outside the area.
+pub(crate) fn dialog_width(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().width() - DIALOG_CHROME_W).clamp(40.0, DIALOG_W)
+}
+
 /// Label printing reads the printed area of at most this many pages (each is a quick render on
 /// the UI thread); further pages print whole.
 pub(crate) const LABEL_CROP_PAGES: usize = 50;

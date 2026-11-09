@@ -12,11 +12,29 @@
 
 use pdfcraft_cos::{Dict, Object, PdfString, Stream};
 use pdfcraft_fonts::{first_undrawable, literal, win_ansi};
-pub use pdfcraft_fonts::{helvetica_width as text_width, wrap};
+
+mod arabic;
 
 use crate::{NOTE_SIZE, Rgb, n};
 
 mod symbols;
+
+/// Advance of the line `s` at `size` points: Helvetica's exact widths, or for text with Arabic (in
+/// a build with the craft-fonts Arabic face) its shaped width in that face, which is how a text box
+/// draws it.
+pub fn text_width(s: &str, size: f64) -> f64 {
+    if arabic::applies(s) { arabic::line_width(s, size) } else { pdfcraft_fonts::helvetica_width(s, size) }
+}
+
+/// Greedy line breaking of `text` within `width` points, as a text box draws it: Helvetica widths,
+/// or the Arabic face's shaped widths for text with Arabic (lines come back in typing order).
+pub fn wrap(text: &str, size: f64, width: f64) -> Vec<String> {
+    if arabic::applies(text) {
+        arabic::wrap_lines(text, size, width).into_iter().map(|l| l.text).collect()
+    } else {
+        pdfcraft_fonts::wrap(text, size, width)
+    }
+}
 
 pub(crate) use symbols::display_stamp;
 use symbols::{CAPTION_SIZE, attach_icon, ellipse, line_caption, line_layout, note_icon, stamp};
@@ -394,7 +412,8 @@ pub fn undrawable_text(d: &Dict) -> Option<(&'static str, char)> {
         b"Redact" => ("the redaction's overlay text", text(b"OverlayText")?),
         _ => return None,
     };
-    Some((what, first_undrawable(&text)?))
+    let bad = if what == "the comment's text" && arabic::applies(&text) { arabic::first_undrawable(&text) } else { first_undrawable(&text) };
+    Some((what, bad?))
 }
 
 /// `/Font` resources naming `/Helv`: standard Helvetica with WinAnsiEncoding.
@@ -1089,6 +1108,26 @@ fn draw_free_text(context: &AppearanceContext<'_>, mut drawing: AppearanceDrawin
         rg(text_color)
     ));
     let mut out = c.into_bytes();
+    // Arabic in a build with the craft-fonts face: shaped, ordered right to left, drawn from Type 3
+    // fonts built from the face (which join the form's resources).
+    let mut fonts = match helvetica_resource() {
+        Object::Dict(f) => f,
+        _ => Dict::new(),
+    };
+    if arabic::applies(&text) {
+        let align = if round { Some(1) } else { d.int(b"Q") };
+        let arabic_fonts = arabic::draw_lines(&mut out, &text, size, rect, pad, width, align, round);
+        for (name, font) in arabic_fonts.iter() {
+            fonts.set(name.clone(), font.clone());
+        }
+        out.extend_from_slice(b"ET\n");
+        res.set(b"Font".to_vec(), Object::Dict(fonts));
+        let mut stream = form(full, &out, res);
+        if let Some(m) = matrix {
+            stream.dict.set(b"Matrix".to_vec(), Object::Array(m.iter().copied().map(Object::Real).collect()));
+        }
+        return Some(stream);
+    }
     let lines = wrap(&text, size, width);
     let mut y = rect[3] - pad - size * 0.9;
     if round {
@@ -1110,7 +1149,7 @@ fn draw_free_text(context: &AppearanceContext<'_>, mut drawing: AppearanceDrawin
         y -= size * 1.2;
     }
     out.extend_from_slice(b"ET\n");
-    res.set(b"Font".to_vec(), helvetica_resource());
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
     let mut stream = form(full, &out, res);
     if let Some(m) = matrix {
         stream.dict.set(b"Matrix".to_vec(), Object::Array(m.iter().copied().map(Object::Real).collect()));

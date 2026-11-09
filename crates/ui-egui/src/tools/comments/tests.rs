@@ -381,7 +381,7 @@ fn other_colour_opens_the_picker_inside_the_quick_bar_fill_popup() {
 }
 
 #[test]
-fn context_menu_colour_submenu_keeps_its_picker_open_and_a_swatch_closes_the_menu() {
+fn the_context_menu_has_no_colour_entry() {
     use egui_kittest::kittest::Queryable;
     let info = DocInfo {
         pages: vec![PageInfo { width: 300.0, height: 400.0, label: String::new(), crop: [0.0, 0.0, 300.0, 400.0], rotation: 0 }],
@@ -425,19 +425,9 @@ fn context_menu_colour_submenu_keeps_its_picker_open_and_a_swatch_closes_the_men
     h.run();
     h.get_by_label("Page").click_secondary();
     h.run();
-    h.get_by_label("Colour").click();
-    h.run();
-    h.get_by_label("Other colour…").click();
-    h.run();
-    assert!(h.query_by_label("Apply").is_some(), "the submenu stays open with the picker showing");
-    h.get_by_label("Red").click();
-    h.run();
-    assert!(h.query_by_label("Edit text…").is_none(), "picking a swatch closes the whole menu");
-    let actions = &h.state().1;
-    assert!(
-        matches!(actions.as_slice(), [CanvasAction::Edit(e)] if matches!(**e, Edit::StyleAnnotation { page: 0, index: 0, color: Some(_), .. })),
-        "{actions:?}"
-    );
+    h.get_by_label("Edit text…");
+    assert!(h.query_by_label("Colour").is_none(), "the context menu has no Colour entry");
+    assert!(h.state().1.is_empty(), "nothing was asked for");
 }
 
 #[test]
@@ -496,6 +486,29 @@ fn drawn_shapes_ignore_slips() {
         drawn_shape(CommentTool::Arrow, &[[0.0, 0.0], [5.0, 0.0]]),
         Some(Shape::Line { start: LineEnding::None, end: LineEnding::OpenArrow, .. })
     ));
+    // Polygon and cloud need three points, connected lines two.
+    for tool in [CommentTool::Polygon, CommentTool::Cloud] {
+        assert_eq!(drawn_shape(tool, &[[0.0, 0.0]]), None);
+        assert_eq!(drawn_shape(tool, &[[0.0, 0.0], [10.0, 0.0]]), None);
+        assert!(matches!(drawn_shape(tool, &[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]]), Some(Shape::Polygon { .. })));
+    }
+    assert_eq!(drawn_shape(CommentTool::PolyLine, &[[0.0, 0.0]]), None);
+    assert!(matches!(drawn_shape(CommentTool::PolyLine, &[[0.0, 0.0], [10.0, 0.0]]), Some(Shape::PolyLine { .. })));
+    // A flat drag (a side under 2 pt) places no rectangle and no oval.
+    for tool in [CommentTool::Rectangle, CommentTool::Oval] {
+        assert_eq!(drawn_shape(tool, &[[0.0, 0.0], [100.0, 0.0]]), None);
+        assert_eq!(drawn_shape(tool, &[[0.0, 0.0], [0.0, 100.0]]), None);
+        assert_eq!(drawn_shape(tool, &[[0.0, 0.0], [100.0, 1.9]]), None);
+    }
+    // A line or arrow shorter than 2 pt, and a click without a drag (one point), place nothing.
+    for tool in [CommentTool::Line, CommentTool::Arrow] {
+        assert_eq!(drawn_shape(tool, &[[0.0, 0.0], [1.0, 1.0]]), None);
+        assert_eq!(drawn_shape(tool, &[[5.0, 5.0]]), None);
+        assert_eq!(drawn_shape(tool, &[]), None);
+    }
+    for tool in [CommentTool::Rectangle, CommentTool::Oval] {
+        assert_eq!(drawn_shape(tool, &[[5.0, 5.0]]), None);
+    }
 }
 
 #[test]
@@ -560,4 +573,40 @@ fn the_hover_outline_goes_round_what_a_press_would_take() {
     assert!(hover_outline(&cx, &cv, None).is_none(), "nor where nothing would take it");
     let selected = CommentView { selected: Some((0, 0)), ..CommentView::default() };
     assert!(hover_outline(&cx, &selected, Some(&comment)).is_none(), "the selected comment has its own frame");
+}
+
+/// Runs one frame in which `key` is pressed, with `keys` for a selected item at (0, 0).
+fn press_delete_key(key: egui::Key, allowed: bool, deletable: bool) -> (Option<Edit>, Option<(usize, usize)>) {
+    let info = DocInfo {
+        pages: vec![PageInfo { width: 300.0, height: 400.0, label: String::new(), crop: [0.0, 0.0, 300.0, 400.0], rotation: 0 }],
+        ..Default::default()
+    };
+    let mut view = DocView::new(pdfcraft_engine::DocId(1), &info, crate::canvas::ViewDefaults::default());
+    view.comments.selected = Some((0, 0));
+    let ctx = egui::Context::default();
+    let mut tool = QuickTool::Select;
+    let input = egui::RawInput {
+        events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }],
+        ..Default::default()
+    };
+    ctx.run_ui(input, |ui| keys(ui.ctx(), &mut view, &mut tool, allowed, &|_, _| deletable)).drop_without_applying_deltas();
+    (view.pending_edit.take(), view.comments.selected)
+}
+
+/// "Delete a markup item": the key asks the engine's delete rule first. A locked item, or a note
+/// with a locked reply (`deletable` is false for both), is not deleted: no edit, the selection
+/// stays and no notice is raised. Without annotate permission the key does nothing either.
+#[test]
+fn delete_and_backspace_keep_an_item_that_is_not_deletable_and_do_nothing_without_permission() {
+    for key in [egui::Key::Delete, egui::Key::Backspace] {
+        let (edit, selected) = press_delete_key(key, true, true);
+        assert!(matches!(edit, Some(Edit::DeleteAnnotation { page: 0, index: 0 })), "a deletable item is deleted by {key:?}");
+        assert_eq!(selected, None);
+        let (edit, selected) = press_delete_key(key, true, false);
+        assert!(edit.is_none(), "a locked item or a note with a locked reply is not deleted by {key:?}");
+        assert_eq!(selected, Some((0, 0)), "the selection stays");
+        let (edit, selected) = press_delete_key(key, false, true);
+        assert!(edit.is_none(), "no annotate permission: {key:?} does nothing");
+        assert_eq!(selected, Some((0, 0)));
+    }
 }

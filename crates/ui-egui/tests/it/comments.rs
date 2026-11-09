@@ -1596,7 +1596,8 @@ fn the_panel_preserves_threads_source_order_and_unfiltered_page_counts() {
         "replies follow source order, not dates"
     );
     h.get_by_label("Accepted");
-    h.get_by_label("Mark with checkmark"); // The later Unmarked reply wins independently.
+    // The panel sets no checkmark: the card has no toggle, whatever the file holds.
+    assert_eq!(h.query_all_by_label("Mark with checkmark").count() + h.query_all_by_label("Remove checkmark").count(), 0);
     assert_eq!(h.query_all_by_label("Status-only token").count(), 0, "status text is searchable but is not a displayed reply");
 
     h.state_mut().views[0].comments.hidden_authors.clear();
@@ -1708,18 +1709,6 @@ fn one_reply_is_deleted_from_its_menu_and_the_thread_stays() {
     h.get_by_label("Right reply");
     h.get_by_label("Accepted");
     assert_eq!(h.state().session.get(id).unwrap().can_undo(), Some("Delete comment"), "one undo step");
-
-    // Copy text copies the reply's text.
-    reply_options(&h, "Right reply").click();
-    h.run_steps(2);
-    h.get_by_label("Copy text").click();
-    let mut copied = false;
-    for _ in 0..4 {
-        h.step();
-        copied |= h.output().platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t == "Right reply"));
-    }
-    assert!(copied, "the reply's text is copied");
-    h.run_steps(2);
 
     // The locked reply's Delete is greyed out; its text can still be edited (ISO 32000-2
     // Table 167: Locked doesn't restrict the contents).
@@ -1938,7 +1927,6 @@ fn a_checkmark_on_a_reply_does_not_mark_its_comment() {
     click_pt(&mut h, (110.0, 110.0));
     assert_eq!(h.state().views[0].comments.selected, Some((0, 0)), "the comment is selected");
     h.get_by_label("Checked reply");
-    h.get_by_label("Mark with checkmark"); // The card's checkmark.
     assert_eq!(h.query_all_by_label("Accepted").count(), 0, "no status badge");
     let p = at(&h, 110.0, 110.0);
     h.hover_at(p);
@@ -1946,9 +1934,9 @@ fn a_checkmark_on_a_reply_does_not_mark_its_comment() {
     h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: true, modifiers: Default::default() });
     h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: false, modifiers: Default::default() });
     h.run_steps(3);
-    h.get_by_label("Copy text"); // The page's menu is open.
+    h.get_by_label("Properties…"); // The page's menu is open.
     assert_eq!(h.query_all_by_label("Remove checkmark").count(), 0);
-    assert_eq!(h.query_all_by_label("Mark with checkmark").count(), 2, "the card and the page's menu");
+    assert_eq!(h.query_all_by_label("Mark with checkmark").count(), 0, "neither the card nor the page's menu sets one");
 }
 
 #[test]
@@ -1966,7 +1954,7 @@ fn the_panel_reveals_edits_and_reopens_a_late_thread_without_changing_its_replie
     assert_eq!(h.state().views[0].comments.collapsed_pages, vec![0]);
     h.get_by_label("More").click();
     h.run_steps(2);
-    h.query_all_by_label("Edit").last().expect("comment menu edit, after the toolbar tab").click();
+    h.get_by_label("Edit text…").click();
     h.run_steps(2);
     let editor = h
         .query_all_by(|n| n.role() == egui::accesskit::Role::MultilineTextInput && n.placeholder() != Some("Add a reply"))
@@ -2114,25 +2102,11 @@ fn comments_take_checkmarks_lock_hide_and_summarize() {
     h.state_mut().set_option("quick", "select").unwrap();
     h.run_steps(2);
     assert_eq!(h.state().views[0].comments.selected, Some((0, 0)), "the new comment is selected");
-    // The card's checkmark.
-    h.get_by_label("Mark with checkmark").click();
+    // The engine still takes a checkmark (the automation tool sets one); the panel only shows it.
+    assert!(h.state_mut().apply_edit(pdfcraft_engine::Edit::MarkAnnotation { page: 0, index: 0, marked: true, author: "Tester".into() }));
     h.run_steps(3);
     assert!(comments(&h).iter().any(|a| a.state.as_deref() == Some("Marked")));
-    h.get_by_label("Remove checkmark");
-
-    // "…" ▸ Copy text puts the comment's text on the clipboard.
-    h.state_mut().apply_edit(pdfcraft_engine::Edit::SetAnnotationContents { page: 0, index: 0, text: "Copy me".into() });
-    h.run_steps(2);
-    h.get_by_label("More").click();
-    h.run_steps(2);
-    h.get_by_label("Copy text").click();
-    let mut copied = false;
-    for _ in 0..4 {
-        h.step();
-        copied |= h.output().platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t == "Copy me"));
-    }
-    assert!(copied, "the text is copied");
-    h.run_steps(2);
+    assert_eq!(h.query_all_by_label("Remove checkmark").count(), 0, "no toggle on the card");
 
     // Properties ▸ Locked.
     h.state_mut().open_comment_props(0, 0);
@@ -2325,9 +2299,10 @@ fn the_panel_filters_by_colour_and_checkmark() {
     h.run_steps(2);
     assert_eq!(h.state().views[0].comments.hidden_colors, vec!["0077D6".to_string()]);
     assert_eq!(cards(&h).1, before.1 - 1, "the blue oval is filtered out");
-    h.get_by_label("Checked").click();
-    h.run_steps(2);
-    assert_eq!(cards(&h).0, before.0 - 1, "the checked rectangle is filtered out");
+    // The filter has no status or checkmark section.
+    for label in ["Status", "Checkmark", "Checked", "Unchecked"] {
+        assert_eq!(h.query_all_by_label(label).count(), 0, "no {label} filter");
+    }
     h.get_by_label("Show all").click();
     h.run_steps(2);
     assert_eq!(cards(&h), before);
@@ -2350,9 +2325,8 @@ fn make_current_properties_default() {
         endings: None,
     });
     h.run_steps(2);
-    h.get_by_label("More").click();
-    h.run_steps(2);
-    h.get_by_label("Make Current Properties Default").click();
+    // The menus no longer offer it; the app's own entry point still works.
+    h.state_mut().make_comment_default(0, 0);
     h.run_steps(3);
     let st = h.state().comment_prefs.style(pdfcraft_ui_egui::comments::CommentTool::Rectangle);
     assert_eq!((st.color, st.opacity, st.width), ([0.0, 0.47, 0.84], 0.5, 5.0));
@@ -2547,9 +2521,7 @@ fn an_arrows_default_does_not_restyle_lines() {
         endings: None,
     });
     h.run_steps(2);
-    h.get_by_label("More").click();
-    h.run_steps(2);
-    h.get_by_label("Make Current Properties Default").click();
+    h.state_mut().make_comment_default(0, 0);
     h.run_steps(3);
     let arrow = h.state().comment_prefs.style(CommentTool::Arrow);
     let line = h.state().comment_prefs.style(CommentTool::Line);
@@ -2697,7 +2669,7 @@ fn an_attachment_comment_opens_its_file_from_the_page_menu() {
     h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: true, modifiers: Default::default() });
     h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: false, modifiers: Default::default() });
     h.run_steps(3);
-    h.get_by_label("Copy text");
+    h.get_by_label("Properties…");
     // The Attachments panel is closed, so these items can only come from the comment's menu.
     h.get_by_label("Save attachment…");
     h.get_by_label("Open in a new tab").click();
@@ -2712,7 +2684,7 @@ fn an_attachment_comment_opens_its_file_from_the_card_menu() {
     h.run_steps(2);
     h.get_by_label("More").click();
     h.run_steps(2);
-    h.get_by_label("Copy text");
+    h.get_by_label("Properties…");
     h.get_by_label("Save attachment…");
     h.get_by_label("Open in a new tab").click();
     h.run_steps(4);
@@ -4314,4 +4286,347 @@ fn escape_with_a_fill_tool_deselects_every_comment_then_drops_the_tool() {
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
     assert_eq!(h.state().quick_tool, QuickTool::Select);
+}
+
+// Contributor-original PDF for the panel's and menus' offers: by index in /Annots, a note (0), a
+// highlight (1), a rectangle (2), a drawing (3), a text box (4), a text callout (5), a locked
+// note (6), a note (7) with a locked reply (8), and a text box (9) with a reply (10) in the file.
+// `/F 128` is the Locked flag.
+const MARKUP_MENUS: &[u8] = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Annots [4 0 R 5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 14 0 R] >> endobj
+4 0 obj << /Type /Annot /Subtype /Text /Rect [20 170 40 190] /NM (n0) /T (Bob Reviewer) /Contents (A note) >> endobj
+5 0 obj << /Type /Annot /Subtype /Highlight /Rect [60 170 140 190] /QuadPoints [60 190 140 190 60 170 140 170] /C [1 1 0] /NM (hl) /T (Bob Reviewer) /Contents (A highlight) >> endobj
+6 0 obj << /Type /Annot /Subtype /Square /Rect [160 150 220 190] /C [1 0 0] /IC [1 1 0.8] /NM (sq) /T (Bob Reviewer) /Contents (A rectangle) >> endobj
+7 0 obj << /Type /Annot /Subtype /Ink /Rect [20 100 80 140] /InkList [[20 100 50 140 80 100]] /C [0 0 1] /NM (ink) /T (Bob Reviewer) /Contents (A drawing) >> endobj
+8 0 obj << /Type /Annot /Subtype /FreeText /Rect [100 100 180 130] /DA (/Helv 12 Tf 0 g) /NM (box) /T (Bob Reviewer) /Contents (A text box) >> endobj
+9 0 obj << /Type /Annot /Subtype /FreeText /IT /FreeTextCallout /Rect [200 100 280 130] /DA (/Helv 12 Tf 0 g) /NM (callout) /T (Bob Reviewer) /Contents (A callout) >> endobj
+10 0 obj << /Type /Annot /Subtype /Text /Rect [20 60 40 80] /NM (locked) /F 128 /T (Bob Reviewer) /Contents (A locked note) >> endobj
+11 0 obj << /Type /Annot /Subtype /Text /Rect [60 60 80 80] /NM (n7) /T (Bob Reviewer) /Contents (A note with a locked reply) >> endobj
+12 0 obj << /Type /Annot /Subtype /Text /Rect [260 20 280 40] /NM (r7) /IRT 11 0 R /F 128 /T (Cat) /Contents (Locked answer) >> endobj
+13 0 obj << /Type /Annot /Subtype /FreeText /Rect [100 30 180 55] /DA (/Helv 12 Tf 0 g) /NM (box2) /T (Bob Reviewer) /Contents (Box with a reply) >> endobj
+14 0 obj << /Type /Annot /Subtype /Text /Rect [220 20 240 40] /NM (r9) /IRT 13 0 R /T (Cat) /Contents (Answer to the box) >> endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+
+/// The panel open and the select tool on, with card `selected` of `MARKUP_MENUS` selected.
+fn markup_menus_harness(selected: usize) -> Harness<'static, PdfCraftApp> {
+    harness_with_bytes(MARKUP_MENUS.to_vec(), move |app| {
+        app.set_option("panel", "comments").unwrap();
+        app.set_option("quick", "select").unwrap();
+        app.views[0].comments.selected = Some((0, selected));
+    })
+}
+
+fn select_card(h: &mut Harness<'static, PdfCraftApp>, index: usize) {
+    h.state_mut().views[0].comments.selected = Some((0, index));
+    h.run_steps(3);
+}
+
+/// How many nodes carry each of `labels`.
+fn counts(h: &Harness<'static, PdfCraftApp>, labels: &[&str]) -> Vec<usize> {
+    labels.iter().map(|l| h.query_all_by_label(l).count()).collect()
+}
+
+fn disabled_count(h: &Harness<'static, PdfCraftApp>, label: &str) -> usize {
+    h.query_all_by_label(label).filter(|n| n.accesskit_node().is_disabled()).count()
+}
+
+fn reply_fields(h: &Harness<'static, PdfCraftApp>) -> usize {
+    h.query_all_by(|n| n.placeholder() == Some("Add a reply")).count()
+}
+
+/// Selects the comment at a page point (the select tool is on) and opens the page's context menu
+/// there.
+fn open_context_menu(h: &mut Harness<'static, PdfCraftApp>, index: usize, p: (f32, f32)) {
+    click_pt(h, p);
+    assert_eq!(h.state().views[0].comments.selected, Some((0, index)), "the click at {p:?} selected the comment");
+    let p = at(h, p.0, p.1);
+    h.hover_at(p);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+    }
+    h.run_steps(3);
+}
+
+fn close_menu(h: &mut Harness<'static, PdfCraftApp>) {
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+}
+
+/// Where each comment of `MARKUP_MENUS` is hit on the page, by index.
+const MARKUP_MENUS_HITS: [(usize, (f32, f32)); 6] =
+    [(0, (30.0, 180.0)), (1, (100.0, 180.0)), (2, (190.0, 170.0)), (3, (50.0, 140.0)), (4, (140.0, 115.0)), (5, (240.0, 115.0))];
+
+/// A reply posted from the card's field with plain Enter (Ctrl+Enter and Shift+Enter are in
+/// `ctrl_enter_posts_a_reply_and_shift_enter_adds_a_line`).
+#[test]
+fn plain_enter_posts_a_reply_from_the_card() {
+    let mut h = markup_menus_harness(0);
+    let before = comments(&h).len();
+    field(&h, "Add a reply").click();
+    h.run_steps(2);
+    field(&h, "Add a reply").type_text("Posted with Enter");
+    h.run_steps(2);
+    assert_eq!(comments(&h).len(), before, "typing does not post");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    let c = comments(&h);
+    assert_eq!(c.len(), before + 1);
+    let reply = c.iter().find(|a| a.contents.as_deref() == Some("Posted with Enter")).expect("the reply");
+    assert_eq!((reply.in_reply_to.as_deref(), reply.author.as_deref()), (Some("n0"), Some("Tester")));
+    assert!(h.state().views[0].comments.reply.is_empty(), "the field is cleared");
+}
+
+/// The card's "Add a reply" field is there for a note, text markup, a shape and a drawing (also
+/// by another user), and not for a text box or a callout; a reply already on a text box shows.
+#[test]
+fn the_card_offers_a_reply_field_on_every_markup_but_a_text_box() {
+    let mut h = markup_menus_harness(0);
+    for index in [0, 1, 2, 3] {
+        select_card(&mut h, index);
+        assert_eq!(reply_fields(&h), 1, "comment {index} takes a reply");
+    }
+    for index in [4, 5, 9] {
+        select_card(&mut h, index);
+        assert_eq!(reply_fields(&h), 0, "comment {index} is a text box: no reply field");
+    }
+    h.get_by_label("Answer to the box");
+}
+
+/// The page's context menu: "Reply" for a note, text markup, a shape and a drawing; none for a
+/// text box or a callout.
+#[test]
+fn the_context_menu_offers_reply_on_every_markup_but_a_text_box() {
+    let mut h = markup_menus_harness(0);
+    for (index, p) in MARKUP_MENUS_HITS {
+        let before = counts(&h, &["Reply", "Edit text…"]);
+        open_context_menu(&mut h, index, p);
+        let after = counts(&h, &["Reply", "Edit text…"]);
+        assert_eq!(after[1], before[1] + 1, "comment {index}: Edit text... is offered");
+        let text_box = index == 4 || index == 5;
+        assert_eq!(after[0], before[0] + usize::from(!text_box), "comment {index}: Reply, text box: {text_box}");
+        close_menu(&mut h);
+    }
+}
+
+/// The card's "More" menu and the page's context menu offer Edit, Reply, Properties and Delete
+/// and none of the removed entries; the card has no checkmark button, the filter no status or
+/// checkmark (a reply's menu is in its own test).
+#[test]
+fn the_menus_offer_only_edit_reply_properties_and_delete() {
+    const REMOVED: [&str; 6] = ["Set status", "Mark with checkmark", "Remove checkmark", "Colour", "Copy text", "Make Current Properties Default"];
+    let mut h = markup_menus_harness(0);
+    assert_eq!(counts(&h, &["Mark with checkmark", "Remove checkmark"]), [0, 0], "no checkmark button on the selected card");
+
+    // The card's menu.
+    let wanted = ["Edit text…", "Reply", "Properties…", "Delete"];
+    let (before, removed) = (counts(&h, &wanted), counts(&h, &REMOVED));
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    for (label, b) in wanted.iter().zip(before) {
+        assert_eq!(h.query_all_by_label(label).count(), b + 1, "the card menu offers {label}");
+    }
+    assert_eq!(counts(&h, &REMOVED), removed, "the card menu offers none of the removed entries");
+    close_menu(&mut h);
+
+    // The same card of a text box: no Reply.
+    select_card(&mut h, 4);
+    let (reply, delete) = (counts(&h, &["Reply"])[0], counts(&h, &["Delete"])[0]);
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    assert_eq!(counts(&h, &["Reply", "Delete"]), [reply, delete + 1], "a text box's card menu has no Reply");
+    close_menu(&mut h);
+
+    // The page's context menu.
+    select_card(&mut h, 0);
+    let wanted = ["Edit text…", "Reply", "Properties…", "Delete"];
+    let (before, removed) = (counts(&h, &wanted), counts(&h, &REMOVED));
+    open_context_menu(&mut h, 0, (30.0, 180.0));
+    for (label, b) in wanted.iter().zip(before) {
+        assert_eq!(h.query_all_by_label(label).count(), b + 1, "the context menu offers {label}");
+    }
+    assert_eq!(counts(&h, &REMOVED), removed, "the context menu offers none of the removed entries");
+    close_menu(&mut h);
+
+    // The filter has no status or checkmark.
+    h.get_by_label("Filter comments").click();
+    h.run_steps(2);
+    assert!(h.query_all_by_label("Type").count() >= 1, "the filter is open");
+    assert_eq!(counts(&h, &["Status", "Checkmark", "Checked", "Unchecked"]), [0, 0, 0, 0]);
+    close_menu(&mut h);
+}
+
+/// A reply's own "..." menu has Edit and Delete and no Copy text (a fresh view: the menus of
+/// other cards left open would take the click).
+#[test]
+fn a_replys_menu_has_edit_and_delete_only() {
+    let mut h = markup_menus_harness(7);
+    let before = counts(&h, &["Edit", "Delete", "Copy text"]);
+    // The reply lies below the 900 pt window: bring its button into view before clicking it.
+    reply_options(&h, "Locked answer").scroll_to_me();
+    h.run_steps(3);
+    reply_options(&h, "Locked answer").click();
+    h.run_steps(2);
+    let after = counts(&h, &["Edit", "Delete", "Copy text"]);
+    assert_eq!(after, [before[0] + 1, before[1] + 1, before[2]], "a reply's menu has Edit and Delete, no Copy text");
+}
+
+/// A locked comment, and a note with a locked reply, cannot be deleted: Delete is disabled in the
+/// card's menu and the context menu, and a locked reply's own Delete is too. Their explanations and
+/// replies stay editable.
+#[test]
+fn a_locked_comment_and_a_note_with_a_locked_reply_are_not_deleted_from_the_menus() {
+    let mut h = markup_menus_harness(0);
+    let delete_disabled = |h: &Harness<'static, PdfCraftApp>| h.get_by_label("Delete").accesskit_node().is_disabled();
+
+    // A note that is not locked: Delete works (control).
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    assert!(!delete_disabled(&h), "an unlocked note's Delete is enabled");
+    close_menu(&mut h);
+
+    for (index, p, why) in [(6, (30.0, 70.0), "a locked note"), (7, (70.0, 70.0), "a note with a locked reply")] {
+        select_card(&mut h, index);
+        h.get_by_label("More").click();
+        h.run_steps(2);
+        assert!(delete_disabled(&h), "{why}: the card menu's Delete is disabled");
+        close_menu(&mut h);
+        open_context_menu(&mut h, index, p);
+        assert!(delete_disabled(&h), "{why}: the context menu's Delete is disabled");
+        assert!(!h.get_by_label("Edit text…").accesskit_node().is_disabled(), "{why}: its text can still be edited");
+        close_menu(&mut h);
+    }
+    assert_eq!(comments(&h).len(), 11, "nothing was deleted");
+
+    // The locked reply's own Delete.
+    select_card(&mut h, 7);
+    reply_options(&h, "Locked answer").click();
+    h.run_steps(2);
+    assert!(delete_disabled(&h), "a locked reply's Delete is disabled");
+    close_menu(&mut h);
+
+    // The explanation and a reply of the locked note stay editable.
+    let edit = pdfcraft_engine::Edit::SetAnnotationContents { page: 0, index: 6, text: "Still editable".into() };
+    assert!(h.state_mut().apply_edit(edit));
+    let reply = pdfcraft_engine::Edit::ReplyToAnnotation { page: 0, index: 6, text: "Reply to a locked note".into(), author: "Tester".into() };
+    assert!(h.state_mut().apply_edit(reply));
+    h.run_steps(2);
+    assert_eq!(comments(&h)[6].contents.as_deref(), Some("Still editable"));
+}
+
+/// The Properties dialog's author field is read-only once the host has set the author name.
+#[test]
+fn the_properties_author_field_is_read_only_after_set_author() {
+    for locked in [false, true] {
+        let mut h = harness_with_bytes(MARKUP_MENUS.to_vec(), move |app| app.author_locked = locked);
+        h.state_mut().open_comment_props(0, 0);
+        h.run_steps(2);
+        h.get_by_label("General").click();
+        h.run_steps(2);
+        let fields: Vec<_> = h.query_all_by(|n| n.role() == Role::TextInput && n.value().as_deref() == Some("Bob Reviewer")).collect();
+        assert_eq!(fields.len(), 1, "the author field");
+        assert_eq!(fields[0].accesskit_node().is_disabled(), locked, "author_locked = {locked}");
+    }
+}
+
+/// A PDF whose permissions forbid annotating, holding a note: the panel lists it and offers no
+/// "Add a comment" box, no reply field and no edit or delete; the page's menu greys Reply out; the
+/// engine refuses the edits.
+#[test]
+fn a_pdf_that_forbids_annotating_offers_no_commenting() {
+    let plain = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Annots [4 0 R] >> endobj
+4 0 obj << /Type /Annot /Subtype /Text /Rect [20 140 40 160] /NM (n0) /T (Bob Reviewer) /Contents (A note) >> endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+    let mut doc = pdfcraft_cos::Document::open(std::sync::Arc::new(plain.to_vec())).expect("fixture parses");
+    doc.set_encryption(&pdfcraft_cos::NewEncryption {
+        algorithm: pdfcraft_cos::Algorithm::Aes256,
+        user_password: "",
+        owner_password: "owner",
+        permissions: 0b0100,
+        encrypt_metadata: true,
+        seed: [7; 32],
+    })
+    .expect("encrypts");
+    let bytes = pdfcraft_cos::write_full(&doc, &Default::default()).expect("writes");
+    let mut h = harness_with_bytes(bytes, |app| {
+        app.set_option("panel", "comments").unwrap();
+        app.set_option("quick", "select").unwrap();
+        app.views[0].comments.selected = Some((0, 0));
+    });
+    let id = h.state().views[0].id;
+    assert!(!h.state().session.get(id).expect("document").allows_annotation(), "annotating is forbidden");
+    h.get_by_label("A note");
+    assert_eq!(h.query_all_by(|n| n.placeholder() == Some("Add a comment")).count(), 0, "no Add a comment box");
+    assert_eq!(reply_fields(&h), 0, "no reply field");
+    assert_eq!(h.query_all_by_label("More").count(), 0, "no More button on the selected card");
+
+    let reply = disabled_count(&h, "Reply");
+    open_context_menu(&mut h, 0, (30.0, 150.0));
+    assert_eq!(disabled_count(&h, "Reply"), reply + 1, "the context menu's Reply is disabled");
+    assert!(h.get_by_label("Edit text…").accesskit_node().is_disabled());
+    assert!(h.get_by_label("Delete").accesskit_node().is_disabled());
+    close_menu(&mut h);
+
+    let reply = pdfcraft_engine::Edit::ReplyToAnnotation { page: 0, index: 0, text: "No".into(), author: "Tester".into() };
+    assert!(!h.state_mut().apply_edit(reply), "the engine refuses a reply");
+    let edit = pdfcraft_engine::Edit::SetAnnotationContents { page: 0, index: 0, text: "No".into() };
+    assert!(!h.state_mut().apply_edit(edit), "the engine refuses an explanation");
+    assert_eq!(comments(&h).len(), 1);
+    assert_eq!(comments(&h)[0].contents.as_deref(), Some("A note"));
+    assert_eq!(h.state().session.get(id).expect("document").can_undo(), None, "nothing was changed");
+}
+
+/// After the host's `set_author`, a new text markup records that name, with no contents, on its page.
+#[test]
+fn a_text_markup_records_the_author_set_by_the_host() {
+    let mut h = harness(|app| {
+        app.set_option("quick", "highlight").unwrap();
+        assert!(app.set_author("Alice Reviewer"));
+    });
+    assert!(h.state().author_locked, "set_author locks the name");
+    highlight_text(&mut h, 4, 14);
+    let c = comments(&h);
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!((c[0].subtype.as_str(), c[0].page), ("Highlight", 0));
+    assert_eq!(c[0].author.as_deref(), Some("Alice Reviewer"));
+    assert!(c[0].contents.as_deref().unwrap_or("").is_empty(), "no contents: {:?}", c[0].contents);
+    assert_eq!(c[0].quads.len(), 1);
+}
+
+/// A PDF with selectable text that forbids annotating: the bar next to the selected text shows
+/// "Add comment", "Highlight", "Underline" and "Strikethrough" disabled.
+#[test]
+fn the_selection_bar_is_disabled_when_the_pdf_forbids_annotating() {
+    let mut doc = pdfcraft_cos::Document::open(std::sync::Arc::new(TEXT_FIXTURE.to_vec())).expect("fixture parses");
+    doc.set_encryption(&pdfcraft_cos::NewEncryption {
+        algorithm: pdfcraft_cos::Algorithm::Aes256,
+        user_password: "",
+        owner_password: "owner",
+        // Print and copy allowed; annotate (bit 6) and modify cleared.
+        permissions: 0b01_0100,
+        encrypt_metadata: true,
+        seed: [7; 32],
+    })
+    .expect("encrypts");
+    let bytes = pdfcraft_cos::write_full(&doc, &Default::default()).expect("writes");
+    let mut h = harness_with_bytes(bytes, |_| {});
+    let id = h.state().views[0].id;
+    assert!(!h.state().session.get(id).expect("document").allows_annotation(), "annotating is forbidden");
+    let labels = ["Add comment", "Highlight", "Underline", "Strikethrough"];
+    let before: Vec<(usize, usize)> = labels.iter().map(|l| (h.query_all_by_label(l).count(), disabled_count(&h, l))).collect();
+    h.state_mut().views[0].select_text(0, 4, 8);
+    h.run_steps(3);
+    assert!(h.state().views[0].selected_text().is_some_and(|t| !t.is_empty()), "the text is selected");
+    for (label, (total, disabled)) in labels.iter().zip(before) {
+        assert_eq!(h.query_all_by_label(label).count(), total + 1, "the bar offers {label}");
+        assert_eq!(disabled_count(&h, label), disabled + 1, "the bar's {label} is disabled");
+    }
+    assert!(comments(&h).is_empty());
 }

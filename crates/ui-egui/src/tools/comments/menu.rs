@@ -2,8 +2,8 @@ use super::input::delete_selected;
 use super::paint::edit_anchor;
 use super::state::{Composer, ComposerKind, Gesture};
 use super::{
-    Annotation, Color32, CommentPrefs, CommentTool, DocInfo, DocView, Edit, Rect, ReviewState, Rgb, SELECT_BLUE, SWATCHES, Sense, Stroke, color32,
-    defaultable, icons, theme, vec2,
+    Annotation, Color32, CommentPrefs, CommentTool, DocInfo, DocView, Edit, Rect, Rgb, SELECT_BLUE, SWATCHES, Sense, Stroke, color32, icons, theme,
+    vec2,
 };
 
 /// Save attachment… and, for a PDF, Open in a new tab, first in a file attachment comment's
@@ -47,7 +47,7 @@ pub(crate) fn context_menu(
     view: &mut DocView,
     info: &DocInfo,
     deletable: &dyn Fn(usize, usize) -> bool,
-    prefs: &CommentPrefs,
+    _prefs: &CommentPrefs,
     rights: MenuRights,
 ) -> Option<CanvasAction> {
     let MenuRights { allowed, can_paste, can_modify } = rights;
@@ -88,49 +88,11 @@ pub(crate) fn context_menu(
                 });
                 ui.close();
             }
-            if ui.add_enabled(allowed, egui::Button::new(tl!("Reply"))).clicked() {
+            // No reply on a text box; without permission to annotate the entry is greyed out.
+            if crate::comments_panel::takes_replies(a) && ui.add_enabled(allowed, egui::Button::new(tl!("Reply"))).clicked() {
                 view.comments.reveal = true;
+                ui.data_mut(|d| d.insert_temp(crate::comments_panel::reply_focus_id((page, index)), true));
                 action = Some(CanvasAction::OpenComments);
-                ui.close();
-            }
-            ui.add_enabled_ui(allowed, |ui| {
-                ui.menu_button(tl!("Set status"), |ui| {
-                    for s in [ReviewState::None, ReviewState::Accepted, ReviewState::Cancelled, ReviewState::Completed, ReviewState::Rejected] {
-                        if ui.button(tl!(s.name())).clicked() {
-                            action =
-                                Some(CanvasAction::Edit(Box::new(Edit::SetAnnotationStatus { page, index, state: s, author: prefs.author.clone() })));
-                            ui.close();
-                        }
-                    }
-                });
-                let keep_open = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-                let _ = egui::containers::menu::SubMenuButton::new(tl!("Colour")).config(keep_open).ui(ui, |ui| {
-                    if let Some(c) = swatch_grid(ui, a.color.map(|c| c.map(f64::from))) {
-                        // Several selected: the app gives each of them the colour.
-                        action = Some(if several > 0 {
-                            CanvasAction::Colour(c)
-                        } else {
-                            CanvasAction::Edit(Box::new(Edit::StyleAnnotation {
-                                page,
-                                index,
-                                color: Some(c),
-                                opacity: None,
-                                width: None,
-                                endings: None,
-                            }))
-                        });
-                        ui.close();
-                    }
-                });
-            });
-            let thread: Vec<&pdfcraft_render::Annotation> = info.annotations.iter().filter(|r| r.replies_to(a)).collect();
-            let marked = crate::comments_panel::is_marked(&thread);
-            if ui.add_enabled(allowed, egui::Button::new(tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" }))).clicked() {
-                action = Some(CanvasAction::Edit(Box::new(Edit::MarkAnnotation { page, index, marked: !marked, author: prefs.author.clone() })));
-                ui.close();
-            }
-            if ui.button(tl!("Copy text")).clicked() {
-                ui.ctx().copy_text(a.contents.clone().unwrap_or_default());
                 ui.close();
             }
             ui.separator();
@@ -160,10 +122,6 @@ pub(crate) fn context_menu(
             }
             if ui.add_enabled(allowed, egui::Button::new(tl!("Properties…"))).clicked() {
                 action = Some(CanvasAction::Properties(page, index));
-                ui.close();
-            }
-            if ui.add_enabled(defaultable(a), egui::Button::new(tl!("Make Current Properties Default"))).clicked() {
-                view.comments.default_request = Some((page, index));
                 ui.close();
             }
         }

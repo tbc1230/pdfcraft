@@ -130,7 +130,8 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
     let modal = widgets::show_modal(ctx, "dialog", |ui| {
         ui.set_width(match dialog {
             Dialog::Properties(_) => 640.0,
-            Dialog::Print => 820.0,
+            // 820, or less in a narrower editor area (the dialog's body sets the same width).
+            Dialog::Print => crate::print_ui::dialog_width(ui.ctx()),
             Dialog::FieldProps | Dialog::BulkFieldProps => 600.0,
             Dialog::Preferences => 610.0,
             Dialog::About => 820.0,

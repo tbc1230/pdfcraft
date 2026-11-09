@@ -690,7 +690,11 @@ impl Gestures<'_> {
 }
 
 /// Delete / Escape handling for comments (only while no text field has focus).
-pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, tool: &mut QuickTool, allowed: bool) {
+/// (only while no text field has focus) The delete rule is the engine's: `deletable(page, index)` is
+/// `Document::annotation_deletable` (`pdfcraft_annot::deletable`: unlocked, and no locked reply).
+/// Delete or Backspace on a selection with an item that is not deletable does nothing: the
+/// selection stays, no notice, no edit.
+pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, tool: &mut QuickTool, allowed: bool, deletable: &dyn Fn(usize, usize) -> bool) {
     if ctx.egui_wants_keyboard_input() {
         return;
     }
@@ -709,6 +713,7 @@ pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, tool: &mut QuickTool
     if allowed
         && cv.selected.is_some()
         && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+        && cv.selection().into_iter().all(|(page, index)| deletable(page, index))
         && let Some(edit) = delete_selected(cv)
     {
         view.pending_edit = Some(edit);

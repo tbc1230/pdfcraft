@@ -211,13 +211,18 @@ pub(super) fn selection_actions(
         |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for (label, action) in [
-                        (tl!("Add comment"), SelectionAction::Note),
-                        (tl!("Highlight"), SelectionAction::Markup(comments::CommentTool::Highlight)),
-                        (tl!("Underline"), SelectionAction::Markup(comments::CommentTool::Underline)),
-                        (tl!("Strikethrough"), SelectionAction::Markup(comments::CommentTool::StrikeOut)),
-                        (tl!("Replace text"), SelectionAction::Replace),
+                    // Each entry follows the one list of offered commands (the web build hides
+                    // "Replace text"); natively `offered` is true for all.
+                    for (id, label, action) in [
+                        ("comment.note", tl!("Add comment"), SelectionAction::Note),
+                        ("comment.highlight", tl!("Highlight"), SelectionAction::Markup(comments::CommentTool::Highlight)),
+                        ("comment.underline", tl!("Underline"), SelectionAction::Markup(comments::CommentTool::Underline)),
+                        ("comment.strikeout", tl!("Strikethrough"), SelectionAction::Markup(comments::CommentTool::StrikeOut)),
+                        ("comment.replace", tl!("Replace text"), SelectionAction::Replace),
                     ] {
+                        if !crate::commands::offered(id) {
+                            continue;
+                        }
                         if ui.add_enabled(can_comment, egui::Button::new(label)).clicked() {
                             chosen = Some(action);
                         }

@@ -5,15 +5,15 @@
 //!   bar in three flyout groups, as in Acrobat's comment toolbar (audit `a14-*`).
 //! - **On the page:** drawing gestures with live previews; with the Select tool, comments can be
 //!   hovered, selected (blue frame with 8 round handles), moved, resized (rectangles, ovals and
-//!   text boxes), edited (double-click) and deleted (⌫ / Delete); a context menu offers Edit,
-//!   Reply, Set status, Colour and Delete.
+//!   text boxes), edited (double-click) and deleted (⌫ / Delete); a context menu offers Edit
+//!   text, Reply (not on a text box), Delete and Properties.
 //! - **Composer:** the floating "Add a comment" card used for new notes, text boxes and edits.
 //!
 //! Everything is turned into `pdfcraft_engine::Edit`s, queued on the view as `pending_edit` and
 //! applied by the app, so each change is one undo step.
 
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, pos2, vec2};
-use pdfcraft_engine::{Edit, LineEnding, Markup, NewAnnotation, NoteIcon, ReviewState, Rgb, Shape, Style};
+use pdfcraft_engine::{Edit, LineEnding, Markup, NewAnnotation, NoteIcon, Rgb, Shape, Style};
 use pdfcraft_render::{Annotation, DocInfo, PageInfo, PageText};
 
 use crate::canvas::{DocView, PageXform};
@@ -425,11 +425,6 @@ fn arrow_ending(ending: LineEnding) -> bool {
 /// Properties Default sets what Fill & Sign gives new text.
 pub(crate) fn typed_text(a: &Annotation) -> bool {
     a.subtype == "FreeText" && a.intent.as_deref() == Some("FreeTextTypeWriter")
-}
-
-/// Whether Make Current Properties Default has defaults to set from `a`.
-pub(crate) fn defaultable(a: &Annotation) -> bool {
-    tool_for(a).is_some() || typed_text(a)
 }
 
 /// The tool that makes comments like `a` (for Make Current Properties Default).

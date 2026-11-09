@@ -56,8 +56,35 @@ fn build_appearance(doc: &Document, d: &Dict) -> Option<Stream> {
     Some(stream)
 }
 
+/// Make every stream held directly inside `d` (at any depth) an object of `doc`, referenced.
+fn hoist_dict(doc: &mut Document, d: &mut Dict) {
+    let keys: Vec<Vec<u8>> = d.iter().map(|(k, _)| k.clone()).collect();
+    for key in keys {
+        if let Some(v) = d.get_mut(&key) {
+            hoist(doc, v);
+        }
+    }
+}
+
+fn hoist(doc: &mut Document, o: &mut Object) {
+    match o {
+        Object::Dict(d) => hoist_dict(doc, d),
+        Object::Array(items) => items.iter_mut().for_each(|v| hoist(doc, v)),
+        Object::Stream(_) => {
+            if let Object::Stream(mut s) = std::mem::replace(o, Object::Null) {
+                hoist_dict(doc, &mut s.dict);
+                *o = Object::Ref(doc.add(Object::Stream(s)));
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Store a built appearance on the annotation: the cheap half of [`set_appearance`].
-fn apply_appearance(doc: &mut Document, r: ObjRef, d: &Dict, stream: Stream) -> Result<(), AnnotError> {
+fn apply_appearance(doc: &mut Document, r: ObjRef, d: &Dict, mut stream: Stream) -> Result<(), AnnotError> {
+    // Streams inside the resources (the glyph procedures of an Arabic text box's Type 3 fonts) must
+    // be objects of their own.
+    hoist_dict(doc, &mut stream.dict);
     // Characters the standard fonts can't draw came out as `?`: mark the annotation with the first.
     let missing = appearance::undrawable_text(d).map(|(_, c)| c);
     let ap = doc.add(Object::Stream(stream));

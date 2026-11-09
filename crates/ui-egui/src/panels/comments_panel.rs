@@ -2,14 +2,15 @@
 //!
 //! Header "Comments N" (comments, as Acrobat counts them) with "N replies" under it and search;
 //! an "Add a comment" box that posts a sticky note on the current page; cards grouped by page.
-//! Selecting a card selects the comment on the page and opens its reply box and "…" menu (Edit,
-//! Set status, Delete), and gives each reply a "…" of its own (Edit, Copy text, Delete). Status
-//! replies show as a badge.
+//! Selecting a card selects the comment on the page and opens its reply box (not on a text box)
+//! and "…" menu (Edit, Reply, Properties, Delete), and gives each reply a "…" of its own (Edit,
+//! Delete). Status replies and checkmarks already in the file show as a badge and a mark; the
+//! panel sets neither.
 
 use std::collections::HashMap;
 
 use egui::{Align, Color32, CornerRadius, Layout, Sense, Stroke, vec2};
-use pdfcraft_engine::{Edit, NoteIcon, ReviewState, Shape};
+use pdfcraft_engine::{Edit, NoteIcon, Shape};
 use pdfcraft_render::{Annotation, DocInfo};
 
 use crate::canvas::DocView;
@@ -82,6 +83,18 @@ pub fn color_key(a: &Annotation) -> String {
 /// The filter's name for a checkmark state.
 fn check_label(marked: bool) -> &'static str {
     if marked { "Checked" } else { "Unchecked" }
+}
+
+/// Whether a reply is offered on the comment `a` (card field, card menu, context menu): on every
+/// kind but a text box (a FreeText, a callout included). Replies already in a file on a text box
+/// stay shown.
+pub fn takes_replies(a: &Annotation) -> bool {
+    a.subtype != "FreeText"
+}
+
+/// Where the card's "Add a reply" field is told to take the keyboard: set by the menus' "Reply".
+pub(crate) fn reply_focus_id(key: (usize, usize)) -> egui::Id {
+    egui::Id::unique(("comment-reply-focus", key))
 }
 
 /// The latest checkmark reply in a thread says "Marked".
@@ -426,13 +439,8 @@ fn card(ui: &mut egui::Ui, view: &mut DocView, context: CardContext<'_>) -> Opti
                         open_menu = more.clicked();
                         more_rect = Some(more.rect);
                     }
-                    // Acrobat's per-comment checkmark: a toggle on the selected card, a mark otherwise.
-                    let tip = if marked { tl!("Remove checkmark") } else { tl!("Mark with checkmark") };
-                    if selected && allowed {
-                        if icons::button(ui, "circle-check", 22.0, marked, tip).clicked() {
-                            edit = Some(Edit::MarkAnnotation { page: a.page, index: a.index, marked: !marked, author: prefs.author.clone() });
-                        }
-                    } else if marked {
+                    // A checkmark already in the file shows as a mark; the panel offers no way to set one.
+                    if marked {
                         ui.add(icons::image("circle-check", 14.0, t.accent)).on_hover_text(tl!("Marked"));
                     }
                     if a.locked {
@@ -484,7 +492,7 @@ fn card(ui: &mut egui::Ui, view: &mut DocView, context: CardContext<'_>) -> Opti
                             if let Some(m) = &r.modified {
                                 ui.add(egui::Label::new(egui::RichText::new(m).font(theme::regular(11.0)).color(t.text_faint)).truncate());
                             }
-                            // Each reply has its own "…" (Edit, Copy text, Delete), as in Acrobat.
+                            // Each reply has its own "…" (Edit, Delete), as in Acrobat.
                             // A Replace Text caret is half of its comment, not a reply: it has none.
                             if selected && allowed && !r.grouped {
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -512,7 +520,8 @@ fn card(ui: &mut egui::Ui, view: &mut DocView, context: CardContext<'_>) -> Opti
                 }
                 above = me;
             }
-            if primary && allowed {
+            // No reply on a text box (replies already in the file are shown above).
+            if primary && allowed && takes_replies(a) {
                 ui.add_space(8.0);
                 egui::Frame::NONE.inner_margin(egui::Margin { left: 34, right: 0, top: 0, bottom: 0 }).show(ui, |ui| {
                     // The field fills its line and Post sits right-aligned under it: a field sized
@@ -526,6 +535,10 @@ fn card(ui: &mut egui::Ui, view: &mut DocView, context: CardContext<'_>) -> Opti
                             .desired_width(f32::INFINITY)
                             .id_salt(("comment-reply", key)),
                     );
+                    // A menu's "Reply" asks for the keyboard here.
+                    if ui.data_mut(|d| d.remove_temp::<bool>(reply_focus_id(key))).unwrap_or(false) {
+                        r.request_focus();
+                    }
                     let enter = crate::comments::submit_key(ui, &r, true);
                     let ok = !view.comments.reply.trim().is_empty();
                     let post =
@@ -592,32 +605,18 @@ fn card(ui: &mut egui::Ui, view: &mut DocView, context: CardContext<'_>) -> Opti
         .show(|ui| {
             ui.set_min_width(160.0);
             crate::comments::attachment_items(ui, view, info, a);
-            if ui.button(tl_ctx!("comment menu", "Edit")).clicked() {
+            if ui.button(tl!("Edit text…")).clicked() {
                 view.comments.open_editor(a.page, a.index, a.contents.clone().unwrap_or_default());
                 ui.close();
             }
-            ui.menu_button(tl!("Set status"), |ui| {
-                for s in [ReviewState::None, ReviewState::Accepted, ReviewState::Cancelled, ReviewState::Completed, ReviewState::Rejected] {
-                    if ui.button(tl!(s.name())).clicked() {
-                        edit = Some(Edit::SetAnnotationStatus { page: a.page, index: a.index, state: s, author: prefs.author.clone() });
-                        ui.close();
-                    }
-                }
-            });
-            if ui.button(tl!(if marked { "Remove checkmark" } else { "Mark with checkmark" })).clicked() {
-                edit = Some(Edit::MarkAnnotation { page: a.page, index: a.index, marked: !marked, author: prefs.author.clone() });
-                ui.close();
-            }
-            if ui.button(tl!("Copy text")).clicked() {
-                ui.ctx().copy_text(a.contents.clone().unwrap_or_default());
+            if takes_replies(a) && ui.button(tl!("Reply")).clicked() {
+                // The card is the one with the handles; its field takes the keyboard.
+                view.comments.select_only(key);
+                ui.data_mut(|d| d.insert_temp(reply_focus_id(key), true));
                 ui.close();
             }
             if ui.button(tl!("Properties…")).clicked() {
                 view.comments.props_request = Some((a.page, a.index));
-                ui.close();
-            }
-            if ui.add_enabled(crate::comments::defaultable(a), egui::Button::new(tl!("Make Current Properties Default"))).clicked() {
-                view.comments.default_request = Some((a.page, a.index));
                 ui.close();
             }
             if crate::commands::offered("comment.copy") && ui.button(tl!("Copy comment")).clicked() {
@@ -662,7 +661,7 @@ fn inline_editor(ui: &mut egui::Ui, t: &Tokens, view: &mut DocView, key: (usize,
     edit
 }
 
-/// A reply's "…" menu, hung from its button `more`: Edit, Copy text and Delete. Delete takes
+/// A reply's "…" menu, hung from its button `more`: Edit and Delete. Delete takes
 /// the reply alone, with what hangs off it (its own replies, status changes and pop-up), as
 /// deleting a comment takes its thread; the comment and its other replies stay. Returns the
 /// edit to apply.
@@ -680,10 +679,6 @@ fn reply_menu(ui: &egui::Ui, view: &mut DocView, r: &Annotation, doc: &pdfcraft_
             ui.set_min_width(140.0);
             if ui.button(tl_ctx!("comment menu", "Edit")).clicked() {
                 view.comments.open_editor(r.page, r.index, r.contents.clone().unwrap_or_default());
-                ui.close();
-            }
-            if ui.button(tl!("Copy text")).clicked() {
-                ui.ctx().copy_text(r.contents.clone().unwrap_or_default());
                 ui.close();
             }
             ui.separator();
@@ -817,11 +812,6 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
             toggle(ui, &mut cv.hidden_authors, a, if a.is_empty() { tl!("Unknown author") } else { a.as_str() });
         }
         ui.separator();
-        ui.label(egui::RichText::new(tl!("Status")).small());
-        for s in ["None", "Accepted", "Rejected", "Cancelled", "Completed"] {
-            toggle(ui, &mut cv.hidden_statuses, s, tl!(s));
-        }
-        ui.separator();
         ui.label(egui::RichText::new(tl!("Colour")).small());
         for (key, c) in &colors {
             ui.horizontal(|ui| {
@@ -840,11 +830,6 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
                     );
                 }
             });
-        }
-        ui.separator();
-        ui.label(egui::RichText::new(tl!("Checkmark")).small());
-        for s in ["Checked", "Unchecked"] {
-            toggle(ui, &mut cv.hidden_checks, s, tl!(s));
         }
         if active && ui.button(tl!("Show all")).clicked() {
             cv.hidden_types.clear();

@@ -2779,3 +2779,110 @@ fn indirect_typewriter_names_keep_outer_whitespace_in_summaries() {
     check(&doc);
     check(&reopen(&doc));
 }
+
+/// The Type 3 font `name` of text box `d`'s normal appearance, with its stream resolved.
+fn ap_font(doc: &Document, d: &Dict, name: &[u8]) -> Dict {
+    let n = d.get(b"AP").map(|a| doc.resolve(a)).and_then(|a| a.as_dict().and_then(|a| a.reference(b"N"))).expect("has /AP /N");
+    let obj = doc.get(n);
+    let Object::Stream(s) = &*obj else { panic!("AP is not a stream") };
+    let res = doc.resolve(s.dict.get(b"Resources").expect("resources"));
+    let fonts = doc.resolve(res.as_dict().expect("resources dict").get(b"Font").expect("fonts"));
+    let font = doc.resolve(fonts.as_dict().expect("font dict").get(name).expect("the font is in the resources"));
+    font.as_dict().expect("a font dictionary").clone()
+}
+
+fn text_box_with(doc: &mut Document, contents: &str) -> usize {
+    let mut boxed = new(0, Shape::TextBox { rect: [100.0, 600.0, 300.0, 650.0], font_size: 12.0 });
+    boxed.contents = contents.into();
+    add_annotation(doc, &boxed, &meta("a")).unwrap()
+}
+
+/// Arabic in a text box, in a build with the craft-fonts Arabic face: drawn in that face, shaped
+/// (letters joined) and from the last letter to the first, not marked as undrawn, and kept through
+/// a save (the font's streams are objects of their own).
+#[test]
+fn arabic_text_box_is_drawn_shaped_right_to_left_in_the_arabic_face() {
+    let word = "\u{633}\u{644}\u{627}\u{645}";
+    let mut doc = fixture();
+    let i = text_box_with(&mut doc, word);
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("skipping the Arabic text box checks: built without a craft-fonts Arab face (set CRAFT_FONTS_DIR)");
+        let d = &list(&doc, 0)[i];
+        assert_eq!(pdfcraft_fonts::undrawn_mark(d), Some('\u{633}'), "no face: shown as ?, marked, kept as typed");
+        assert_eq!(text(d, b"Contents"), word);
+        return;
+    }
+    let check = |doc: &Document| {
+        let d = &list(doc, 0)[i];
+        assert_eq!(text(d, b"Contents"), word);
+        assert!(appearance::undrawable_text(d).is_none());
+        assert_eq!(pdfcraft_fonts::undrawn_mark(d), None, "not marked as undrawn");
+        let content = ap_content(doc, d);
+        assert!(!content.contains("(?"), "{content}");
+        let font = ap_font(doc, d, b"PCAr0");
+        assert_eq!(font.name(b"Subtype"), Some(&b"Type3"[..]));
+        let clusters = pdfcraft_fonts::shape_arabic(word, true).unwrap();
+        // Drawn from the last letter: code 1 is the shaper's first (leftmost) cluster.
+        let tou = doc.resolve(font.get(b"ToUnicode").unwrap());
+        let Object::Stream(tou) = &*tou else { panic!("ToUnicode is not a stream") };
+        let tou = String::from_utf8_lossy(&tou.decoded().unwrap()).into_owned();
+        let hex = |s: &str| s.encode_utf16().map(|u| format!("{u:04X}")).collect::<String>();
+        assert!(tou.contains(&format!("<01> <{}>", hex(&clusters[0].text))), "{tou}");
+        assert_eq!(clusters[0].text, "\u{645}", "the first drawn letter is the last typed");
+        let widths = doc.resolve(font.get(b"Widths").unwrap());
+        let first = widths.as_array().unwrap()[0].as_f64().unwrap();
+        assert_eq!(first, (clusters[0].advance * 1000.0).round());
+        assert!(content.contains("/ActualText <FEFF0633"), "the typed text is kept for copy and search: {content}");
+    };
+    check(&doc);
+    check(&reopen(&doc));
+    // The box is measured with the shaped widths.
+    let clusters = pdfcraft_fonts::shape_arabic(word, true).unwrap();
+    let want: f64 = clusters.iter().map(|c| c.advance * 12.0).sum();
+    assert!((appearance::text_width(word, 12.0) - want).abs() < 1e-9);
+    assert_eq!(appearance::wrap(word, 12.0, 1000.0), vec![word.to_string()]);
+}
+
+/// Joined letters: three of the same letter use initial, medial and final forms, so three
+/// different glyphs are drawn where an unjoined text would repeat one; wrapping uses the shaped
+/// widths of the words.
+#[test]
+fn arabic_text_box_letters_take_their_joining_forms() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("skipping the Arabic text box checks: built without a craft-fonts Arab face (set CRAFT_FONTS_DIR)");
+        return;
+    }
+    let mut doc = fixture();
+    let i = text_box_with(&mut doc, "\u{628}\u{628}\u{628}");
+    let font = ap_font(&doc, &list(&doc, 0)[i], b"PCAr0");
+    assert_eq!(font.int(b"LastChar"), Some(3), "initial, medial and final forms are three glyphs");
+    let word = "\u{633}\u{644}\u{627}\u{645}";
+    let w = appearance::text_width(word, 12.0) + 1.0;
+    assert_eq!(appearance::wrap(&format!("{word} \u{628}\u{628}\u{628}"), 12.0, w).len(), 2);
+}
+
+/// Western European text is drawn as typed; text in a script with no face is kept, drawn as `?`
+/// and marked; Latin beside Arabic stays Latin.
+#[test]
+fn text_box_scripts_with_and_without_a_face() {
+    let mut doc = fixture();
+    let a = text_box_with(&mut doc, "Revision \u{e0} faire \u{e9}\u{e8}\u{e7}\u{153}");
+    let d = &list(&doc, 0)[a];
+    assert!(appearance::undrawable_text(d).is_none());
+    assert_eq!(pdfcraft_fonts::undrawn_mark(d), None);
+    assert!(!ap_content(&doc, d).contains('?'));
+    let cyrillic = "\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}";
+    let c = text_box_with(&mut doc, cyrillic);
+    let d = &list(&doc, 0)[c];
+    assert_eq!(text(d, b"Contents"), cyrillic);
+    assert_eq!(pdfcraft_fonts::undrawn_mark(d), Some('\u{41f}'));
+    assert!(ap_content(&doc, d).contains("(??????)"));
+    if pdfcraft_fonts::document_arabic_font().is_some() {
+        let m = text_box_with(&mut doc, "\u{645}\u{631}\u{62d}\u{628}\u{627} World");
+        let d = &list(&doc, 0)[m];
+        assert!(appearance::undrawable_text(d).is_none());
+        assert!(ap_content(&doc, d).contains("(World) Tj"));
+        let x = text_box_with(&mut doc, "\u{645}\u{631} \u{41f}");
+        assert_eq!(appearance::undrawable_text(&list(&doc, 0)[x]).map(|(_, c)| c), Some('\u{41f}'));
+    }
+}

@@ -1418,7 +1418,7 @@ fn drawing_a_comment_by_drag_and_its_context_menu() {
     assert_eq!(st["documents"][0]["dirty"], true);
     // A right-click on it offers the comment menu.
     ok(&mut h, &c, "ui.click", json!({ "x": (a[0] + b[0]) / 2.0, "y": (a[1] + b[1]) / 2.0, "button": "secondary" }));
-    let menu = ok(&mut h, &c, "ui.inspect", json!({ "query": "Set status" }));
+    let menu = ok(&mut h, &c, "ui.inspect", json!({ "query": "Edit text…" }));
     assert!(menu["count"].as_u64().unwrap() >= 1, "{menu}");
     assert!(call(&mut h, &c, "ui.drag", json!({ "from": [1, 2] })).unwrap_err().contains("to must be"));
 }

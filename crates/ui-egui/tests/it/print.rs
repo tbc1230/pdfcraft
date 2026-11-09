@@ -967,3 +967,148 @@ fn printing_does_not_change_the_document() {
     assert_eq!(state(&h), before);
     let _ = std::fs::remove_file(out);
 }
+
+// ---- The dialog fits the editor area (Issue 5) ----
+
+/// Editor area sizes: the Mock/Stub's 760 x 596 (required), the large window that keeps today's
+/// layout, and smaller ones. The list is test data, not a bound.
+const FIT_SIZES: [(f32, f32); 5] = [(760.0, 596.0), (1400.0, 900.0), (520.0, 400.0), (400.0, 300.0), (300.0, 200.0)];
+
+/// The Print dialog open in an editor area of `size`, with one printer listed and chosen so the
+/// confirming button is labelled "Print".
+fn fit_harness(size: (f32, f32), printer: bool) -> Harness<'static, PdfCraftApp> {
+    use pdfcraft_engine::print::spool::Printer;
+    let mut h = Harness::builder().with_size(egui::vec2(size.0, size.1)).build_eframe(|_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("form.pdf", None, include_bytes!("../data/form.pdf").to_vec()).unwrap();
+        app
+    });
+    h.run_steps(4);
+    if printer {
+        h.state_mut().printer_source =
+            Some(std::sync::Arc::new(|| vec![Printer { name: "Office".into(), default: true, two_sided: None, description: String::new() }]));
+    }
+    assert!(h.state_mut().execute("print.dialog"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while h.state().print_draft.printers_loading && std::time::Instant::now() < deadline {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if !printer {
+        h.state_mut().print_draft.printer = None;
+    }
+    h.run_steps(6);
+    h
+}
+
+fn print_title(h: &Harness<'static, PdfCraftApp>) -> egui::Rect {
+    h.get_by(|n| n.role() == Role::Label && n.value().as_deref() == Some("Print")).rect()
+}
+
+fn dialog_card(h: &Harness<'static, PdfCraftApp>) -> egui::Rect {
+    h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::unique("dialog").with("card"))).expect("the Print dialog is shown")
+}
+
+fn inside(rect: egui::Rect, size: (f32, f32)) -> bool {
+    rect.min.x >= -0.5 && rect.min.y >= -0.5 && rect.max.x <= size.0 + 0.5 && rect.max.y <= size.1 + 0.5
+}
+
+#[test]
+fn the_print_dialog_lies_inside_the_editor_area_at_any_size() {
+    for size in FIT_SIZES {
+        let h = fit_harness(size, true);
+        let card = dialog_card(&h);
+        assert!(inside(card, size), "{size:?}: the card {card:?} is outside the area");
+        let title = print_title(&h);
+        assert!(inside(title, size), "{size:?}: the title {title:?} is outside the area");
+        for name in ["Print", "Cancel"] {
+            let button = h.get_by_role_and_label(Role::Button, name).rect();
+            assert!(inside(button, size), "{size:?}: the {name} button {button:?} is outside the area");
+            assert!(title.max.y < button.min.y, "{size:?}: the title {title:?} above {name} {button:?}");
+        }
+    }
+}
+
+#[test]
+fn the_settings_scroll_and_the_print_row_stays_put() {
+    for size in FIT_SIZES {
+        let mut h = fit_harness(size, true);
+        let print = h.get_by_role_and_label(Role::Button, "Print").rect();
+        let cancel = h.get_by_role_and_label(Role::Button, "Cancel").rect();
+        h.get_by_role_and_label(Role::ComboBox, "Comments & Forms").scroll_to_me();
+        h.run_steps(8);
+        assert_eq!(h.get_by_role_and_label(Role::Button, "Print").rect(), print, "{size:?}: Print moved while the settings scrolled");
+        assert_eq!(h.get_by_role_and_label(Role::Button, "Cancel").rect(), cancel, "{size:?}: Cancel moved while the settings scrolled");
+        // Scrolled into the body: below the title, above the Print row.
+        let combo = h.get_by_role_and_label(Role::ComboBox, "Comments & Forms").rect();
+        assert!(
+            combo.min.y >= print_title(&h).max.y && combo.max.y <= print.min.y + 0.5,
+            "{size:?}: the control {combo:?} is not in the body above {print:?}"
+        );
+        assert!(inside(h.get_by_role_and_label(Role::Button, "Print").rect(), size));
+    }
+}
+
+#[test]
+fn below_860_points_the_preview_is_under_the_settings_and_nothing_lies_outside_horizontally() {
+    for size in FIT_SIZES.into_iter().filter(|s| s.0 < 860.0) {
+        let h = fit_harness(size, true);
+        let last_setting = h.get_by_label("Advanced".to_uppercase().as_str()).rect();
+        let sheet = h.get_by_label_contains("Sheet 1 of").rect();
+        assert!(sheet.min.y >= last_setting.max.y - 0.5, "{size:?}: the preview {sheet:?} is not under the settings {last_setting:?}");
+        for (what, rect) in [
+            ("card", dialog_card(&h)),
+            ("title", print_title(&h)),
+            ("Print", h.get_by_role_and_label(Role::Button, "Print").rect()),
+            ("Cancel", h.get_by_role_and_label(Role::Button, "Cancel").rect()),
+            ("Comments & Forms", h.get_by_role_and_label(Role::ComboBox, "Comments & Forms").rect()),
+            ("sheet", sheet),
+        ] {
+            assert!(rect.min.x >= -0.5 && rect.max.x <= size.0 + 0.5, "{size:?}: {what} {rect:?} lies outside the area horizontally");
+        }
+    }
+}
+
+#[test]
+fn at_1400_by_900_the_dialog_keeps_two_columns_820_wide_without_scrolling() {
+    let h = fit_harness((1400.0, 900.0), true);
+    // The card is the 820 point content and its 20 point padding on each side.
+    let card = dialog_card(&h);
+    assert!((card.width() - 860.0).abs() <= 2.0, "the card is {} wide", card.width());
+    let settings = h.get_by_role_and_label(Role::ComboBox, "Comments & Forms").rect();
+    let sheet = h.get_by_label_contains("Sheet 1 of").rect();
+    assert!(sheet.min.x >= settings.max.x, "two columns: the preview {sheet:?} beside the settings {settings:?}");
+    // No scrolling: the last setting is in view without scroll_to_me, above the Print row.
+    let last_setting = h.get_by_label("Advanced".to_uppercase().as_str()).rect();
+    let print = h.get_by_role_and_label(Role::Button, "Print").rect();
+    assert!(last_setting.max.y <= print.min.y, "everything is in view: {last_setting:?} above {print:?}");
+}
+
+#[test]
+fn the_print_dialog_opens_at_its_final_size_and_does_not_move_afterwards() {
+    for size in [(760.0, 596.0), (1400.0, 900.0)] {
+        let mut h = fit_harness(size, true);
+        let settled = (print_title(&h), h.get_by_role_and_label(Role::Button, "Print").rect(), dialog_card(&h));
+        h.run_steps(8);
+        let later = (print_title(&h), h.get_by_role_and_label(Role::Button, "Print").rect(), dialog_card(&h));
+        assert_eq!(settled, later, "{size:?}: the dialog moved or grew after six frames");
+    }
+}
+
+#[test]
+fn the_print_button_prints_at_760_by_596() {
+    let mut h = fit_harness((760.0, 596.0), false);
+    let out = std::env::temp_dir().join(format!("pdfcraft-print-fit-{}.pdf", std::process::id()));
+    h.state_mut().save_override = Some(out.to_string_lossy().into_owned());
+    // No printer on a test machine, so the confirming button reads Save as PDF; it is the Print button.
+    let button = h.get_by_role_and_label(Role::Button, "Save as PDF").rect();
+    assert!(inside(button, (760.0, 596.0)), "{button:?}");
+    h.get_by_role_and_label(Role::Button, "Save as PDF").click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, None);
+    let bytes = std::fs::read(&out).expect("saved");
+    let doc = pdfcraft_cos::Document::open(std::sync::Arc::new(bytes)).unwrap();
+    assert_eq!(pdfcraft_model::pages(&doc).len(), 1);
+    let _ = std::fs::remove_file(out);
+}
