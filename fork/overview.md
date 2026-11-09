@@ -21,7 +21,7 @@ sources:
 
 ## The editor's WASM
 - Today: PdfCraft's existing web build, `apps/pdfcraft-web`, built with trunk. A hosting page exchanges files and saves with it through `data-host="page"` events on its canvas, and since upstream `9dbede87` can drive it through `window.pdfcraft` (page command API, opt-in with `?control`, `apps/pdfcraft-web/src/api.rs`).
-- Planned: a library crate in the fork (cdylib, wasm-bindgen) built with wasm-pack into a package Workspace imports directly; no iframe, no postMessage bridge.[^plan]
+- Deferred: a library crate in the fork (cdylib, wasm-bindgen) built with wasm-pack into a package Workspace imports directly.[^plan] It waits until Workspace's stack is decided (the spike "Workspace framework and language"); what Workspace needs from it (loading the editor as a module, no iframe, no postMessage bridge, one API) is met by the web build above (product owner, 2026-11-09).
 
 ## Following upstream
 - See [Branches and syncing](/decisions/branches.md).

@@ -56,7 +56,7 @@ A backlog item names one function of the editor's interface. Workspace uses them
 - Unsaved work is kept by Workspace's Draft Management, not by the editor's autosave and crash recovery, which are hidden.[^backlog]
 
 ## Today's build
-The library build with this API is planned.[^plan] Until then the editor under test is upstream's web build `apps/pdfcraft-web`, hosted by the Mock/Stub:
+The library build with this API is deferred until Workspace's stack is decided (product owner, 2026-11-09).[^plan] The editor is upstream's web build `apps/pdfcraft-web`, hosted by the Mock/Stub:
 - `data-host="page"` on the canvas `pdfcraft`, with CustomEvents on it: `pdfcraft:ready`, `pdfcraft:open` (the page sends `{ name, bytes }`), `pdfcraft:dirty`, `pdfcraft:failed`, and the fork's `pdfcraft:state` (the editor state, each time it changes). `pdfcraft:save` is sent only by the editor's own Save, which the web build no longer offers.
 - The fork's functions on `window.pdfcraft`, present on every page: `setLanguage`, `setTheme`, `setAuthor` (also given at start as `data-language`, `data-theme`, `data-author` on the canvas), `save()`, `runCommand(id)` and `getState()` ([Host API](/changes/host-api.md)).
 - Upstream's page command API on `window.pdfcraft` (`apps/pdfcraft-web/src/api.rs`: `execute`, `docInspect`, `uiInspect` and the others), present only when the page is opened with `?control`; the Mock/Stub's tests use it to inspect the editor, and the client does not need it.

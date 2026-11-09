@@ -40,20 +40,22 @@ Epics are capabilities: what Workspace enables users or the organisation to acco
 * Version: one stored state of a document that Workspace keeps and can tell apart from the other stored states of the same document.
 * Metadata: the descriptive information Workspace keeps about a document.
 * Read permission, save permission: the organisation's decision whether a logged-in user may read a document, or may save changes to it, enforced by Workspace.
-* Document permissions: the restrictions a PDF's author set inside the file, which the editor honours and reports as permissions.
+* PDF file permissions: the restrictions a PDF's author set inside the file, which the editor honours and reports as permissions.
 * Save: one of the three save actions, Save, Save as a Version and Save as new Item. In Save, the changes are stored to the open stored document without creating a version ("Save changes to the fileserver"); Save as a Version creates a version on request ("Save as a Version"); Save as new Item stores a draft that has no fileserver identity as a new stored document with its first version ("Save as new Item"). Saving does not end the work: the user saves and continues.
-* Markup: the annotations users add to pages: notes (with their replies), text markup, text boxes, ink drawings and shapes. Text corrections, added images and links are named by their own terms and are not markup.
+* Markup: the annotations users add to pages: notes, text markup, text boxes, ink drawings and shapes; every markup item other than a text box can carry replies. Text corrections, added images and links are named by their own terms and are not markup.
 * Markup item: one annotation the editor builds: a note, a text markup, a text box, an ink drawing or a shape.
 * Text markup: the PDF text markup annotation types highlight, underline, squiggly underline and strike out, applied to a passage of selected text.
-* Note: a markup item type: a comment attached to a point on a page.
+* Note: a markup item type: a PDF file comment attached to a point on a page.
 * Explanation: the text a reviewer attaches to a markup item to say why it was made.
-* Comment: a note or a reply; the comments panel lists comments as threads.
+* PDF file comment: a comment annotation in a PDF file: a note, or a reply to a markup item. It is part of the file and changes with the file's version; the editor makes it, and the comments panel lists it with the markup item it belongs to.
+* Workspace Document Comment: a comment that Workspace manages through its own API and attaches to a document across all its versions; it is not in the PDF file and is outside the fork's scope.
+* The bare word "comment" is not used in this backlog; every item says PDF file comment or Workspace Document Comment.
 * Text box: a remark written directly onto a page.
-* Reply: an answer to a comment. A comment and its replies form a thread.
+* Reply: an answer to a markup item other than a text box, made in the editor as a reply annotation in the file; a markup item and its replies form a thread.
 * Added image: an image that a reviewer places on a page as page content.
 * Link: an area of a page that readers can follow to a target.
 * Placed object: an added image, a note, a text box, an ink drawing or a shape. Text markup is not a placed object: it stays on its text passage.
-* Comments panel: the editor's panel that lists a document's comments as threaded conversations.
+* Comments panel: the editor's panel that lists a document's markup items, with the replies to each as a thread.
 * Reviewer: a Workspace user who reviews and marks up a document.
 * Stamp: one of the organisation's marks, provided by the existing APIs, that states a document's status.
 * Watermark: one of the organisation's marks, provided by the existing APIs, that shows status or confidentiality across a page.
@@ -249,7 +251,7 @@ Component: PdfCraft fork
 
 As a user, I want to see the properties the editor knows about the open document, so that I understand what it contains.
 Acceptance criteria:
-* Given a document is open, When the user views its properties, Then the editor shows its Document Properties: title, author, subject and keywords; the fonts used and whether each is embedded; PDF version, page size, tags, fields, layers and attachments; encryption method, which password opened it, and each document permission.
+* Given a document is open, When the user views its properties, Then the editor shows its Document Properties: title, author, subject and keywords; the fonts used and whether each is embedded; PDF version, page size, tags, fields, layers and attachments; encryption method, which password opened it, and each PDF file permission.
 * Title, author, subject and keywords are shown read-only; they are separate from Workspace's metadata ("See a document's metadata") and are not synchronised with it.
 
 ## Epic: Know when a document cannot be opened
@@ -505,6 +507,13 @@ Acceptance criteria:
 * Given the user has selected pages, when the user prints, then only the selected pages are printed.
 * (added; mods:216 and "Honour the restrictions set inside a PDF"; `chrome.rs:526-535`, engine `commands.rs:195`) Given the permissions do not allow printing the Print button is disabled with the editor's hover text, `runCommand("print.dialog")` returns `{ ok: false, error: "command print.dialog is not available now" }` and nothing prints. Test: e2e with the encrypted fixture (print bit cleared).
 * (added; hosting.md) A print that succeeds does not change the document: `edit_generation` and `can_undo` are as before; the fallback download changes neither and sends no `pdfcraft:save` event. Test: e2e.
+* (added; Issue 5) In a 1280 x 720 browser window, with the editor area the Mock/Stub gives (760 x 596 points), the whole Print dialog lies inside the editor area: its title, its settings and its Print and Cancel buttons have rectangles with 0 <= x, y and x1 <= 760, y1 <= 596. Test: e2e at `set_viewport_size(1280, 720)`: `runCommand("print.dialog")`, `uiInspect` rects of the button with role Button and label "Print", "Cancel" and the title (role Label, value "Print"); fork test in `tests/it/print.rs` with `Harness::builder().with_size(egui::vec2(760.0, 596.0)).build_eframe(...)` and `get_by_role_and_label(Role::Button, "Print")`.
+* (added; Issue 5) At that size the Print button can be clicked and the browser's print dialog opens with the document's pages in order, and Cancel closes the dialog with nothing printed. Test: e2e at 1280 x 720 with `RECORD_PRINT` of `test_item_print.py`: `__printed` has one entry of 4 sheets for a 4-page document; Cancel leaves `__printed` unchanged and `docInspect().dialog` null. `start` moves to 1280 x 720, and `print_now` scrolls the dialog's settings before it clicks the "Comments & Forms" combo; the existing tests C1-C8 of that file are re-run at 1280 x 720 as part of this item.
+* (added; Issue 5, the Preferences precedent `dialogs.rs:1371-1405`) When the settings are taller than the editor area they scroll inside the dialog and the Print and Cancel row stays in view below them; every setting can be reached by scrolling. Test: fork test at 760 x 596 and at the sample sizes below: the "Comments & Forms" control brought into view with `scroll_to_me`, and the Print button's rectangle unchanged by that.
+* (added; Issue 5, the design above) The dialog is never wider than the editor area: below 860 points the preview moves under the settings, no control lies outside the area horizontally and no horizontal scroll is needed to reach a button. At 1400 x 900 the dialog keeps today's size (820 wide, two columns, no scroll). Test: fork test at 760 x 596 and at the narrower sample sizes below; at 1400 x 900 the existing tests `print_dialog_lays_out_sheets_and_saves_a_pdf` and the others in `tests/it/print.rs` pass unchanged.
+* (added; Issue 5, `preferences_layout.rs:51-80`) The dialog opens at its final size and does not move or grow in the frames after it opens. Test: fork test: the rectangles of the title and the Print button are equal after 6 and 14 frames at 760 x 596 and at 1400 x 900.
+* (added; Workspace supports French and Arabic, `fork/hosting.md:31`) The same holds with the interface in French and in Arabic (right to left): Print and Cancel inside the editor area at 760 x 596. Test: e2e; `setLanguage("fr")` and `("ar")`, same rectangle check (needs the build with craft-i18n; with Arabic, craft-fonts, Issue 3).
+* (added; Issue 5, product owner 2026-11-09: the dialog scrolls, its Print and Cancel buttons stay reachable at any editor area size, no lower bound; the Preferences precedent, `dialogs.rs:1371-1405`, `preferences_layout.rs:28`) At any editor area size the body of the dialog scrolls and the Print and Cancel buttons stay inside the area and reachable, with no horizontal scroll needed to reach them; no smallest size is set. Test: fork test loops over sample sizes as `preferences_layout.rs:28` loops over heights: 760 x 596 (required, Issue 5), 1400 x 900, 520 x 400, 400 x 300 and 300 x 200; the list is test data, not a bound; e2e at 1280 x 720 and at 1024 x 600 windows.
 
 ## Epic: Find words quickly
 
@@ -605,10 +614,16 @@ Acceptance criteria:
 * Given four passages on one page, when the reviewer applies highlight to the first, underline to the second, squiggly underline to the third and strike out to the fourth, then the document holds four text markup annotations. Their subtypes are Highlight, Underline, Squiggly and StrikeOut, and each covers its own passage.
 * Given a selected passage that runs over two lines, when the reviewer highlights it, then the highlight covers the selected text on both lines and no text outside the selection.
 * Text markup is kept as stated in "Placed objects and corrections are kept in the saved document".
+* (added; "Run commands from the client", `offered-commands.md`: each tool is offered and reachable) Each of the four types is applied by a selection then `runCommand`; its command then a drag; the hotbar's Highlight flyout (Squiggly is on it); and, for highlight, underline and strike out, the bar next to a selection. Test: e2e; one annotation of the right subtype per type and path (the bar by `uiInspect` labels "Highlight", "Underline", "Strikethrough" and a click).
+* (added; "Set the author name for markup") After `setAuthor("Alice Reviewer")` a new text markup records /T "Alice Reviewer", an empty /Contents and the page it is on. Test: e2e; `annots.py`; fork test: `set_author` then a markup edit, `comments(&h)[0].author`.
+* (added; "Hide upstream functions that overlap Workspace concerns", `offered-commands.md` "one list that every surface follows"; the product owner's criterion "No hidden part can be opened from anywhere in the editor: not from its menus, toolbars, hotbar, ... context menus, command search or keyboard shortcuts", mods:1036) Replace text and Insert text are hidden: `runCommand("comment.replace")` and `("comment.caret")` return "is not offered in this editor"; the bar next to a selection offers "Add comment", Highlight, Underline, Strikethrough and Copy and no "Replace text"; the hotbar's Highlight flyout and command search list neither. Test: e2e (`uiInspect` labels after a selection, flyout labels, `palette_labels`); not a native test (`offered` is true natively). Code change: `selection.rs:211-221` filters by `offered()`.
+* (added; failure; inference from `selection_quads`; area highlight: upstream, `canvas.rs` drag box with the Highlight tool, as PDF editors offer for scanned pages) A drag with the underline, squiggly underline or strike out tool over a page with no text (`pdfs.build(1)`) creates nothing: `edit_generation` and `can_undo` as before. With the highlight tool the same drag highlights the dragged area: one Highlight whose quad is the dragged box. `runCommand("comment.highlight")` with no selection returns `{ ok: true }`, adds nothing and leaves the highlight tool chosen with the Comments panel open. Test: e2e.
+* (added; the selection has one page, `selection.rs:4-8`; the backlog speaks of "a passage") A drag that starts on one page and ends on the next adds markup on one page only: no annotation has quads on two pages. Test: e2e; `passages(pages=2)` in continuous layout, drag from page 1 over the page break into page 2; `annots.py` shows annotations on one page only. A passage over two pages needs two markup items.
+* (added; "Honour the restrictions set inside a PDF") Given the PDF file permissions do not allow annotating, `runCommand` of each of the four commands returns `{ ok: false, error: "command comment.highlight is not available now: ..." }`, nothing is added, and the bar next to a selection is disabled (`add_enabled(can_comment, ...)`, `selection.rs:221`). Test: e2e `runCommand` refusals with the encrypted fixture; fork test of the disabled bar with an encrypted PDF that has text.
 
 ## Epic: Comment at a specific place
 
-Capability: Reviewers leave comments attached to a point on a page and discuss them in threads.
+Capability: Reviewers leave PDF file comments attached to a point on a page and discuss them in threads.
 
 ### Feature: Notes
 
@@ -616,22 +631,33 @@ Capability: Reviewers leave comments attached to a point on a page and discuss t
 
 Component: PdfCraft fork
 
-As a reviewer, I want to attach a comment to a point on a page, so that readers know exactly what my comment refers to.
+As a reviewer, I want to attach a PDF file comment to a point on a page, so that readers know exactly what it refers to.
 Acceptance criteria:
 * Given an open document, when the reviewer chooses the note tool and clicks a point on a page, then a note is placed at that point and the reviewer can type its explanation.
 * Given a placed note with an explanation, when the reviewer opens the note, then it shows the explanation the reviewer typed.
 * The author recorded on the note is the logged-in user's display name, set through "Set the author name for markup"; the reviewer cannot change it in the editor.
 * Notes are kept as stated in "Placed objects and corrections are kept in the saved document".
+* (added; the composer asks for the explanation first, `composer.rs:88`; sibling "Place an image on a page": a note "carries the explanation") A note exists when it is posted with a text: Cancel, Escape, or Post with no text places no note, and `edit_generation` and `can_undo` are as before. Test: e2e; click with the note tool, press Escape; again with Cancel.
+* (added; "a note is placed at that point") The note is on the page that was clicked, with its icon's top-left at the point, also when the page is not the first and when the view is scrolled. Test: e2e; `passages(pages=3)`, click on page 2; annotation on page 2 only.
+* (added; "Honour the restrictions set inside a PDF") Given the PDF file permissions do not allow annotating, `runCommand("comment.note")` is refused as in item 1, the page context menu's "Add comment" is disabled, and the panel has no "Add a comment" box. Test: e2e with the encrypted fixture.
 
-#### Story: Reply to a comment
+#### Story: Reply to a PDF file comment
 
 Component: PdfCraft fork
 
-As a reviewer, I want to reply to a comment, so that the discussion about one place stays together.
+As a reviewer, I want to reply to a markup item other than a text box, so that the discussion about one place stays together in the file.
 Acceptance criteria:
 * Given a note with an explanation, when the reviewer adds a reply, then the comments panel shows the reply in the thread of that note.
 * Given a thread with two replies, when the document is saved and opened again, then the thread shows both replies in the order they were added.
 * The author recorded on a reply is the logged-in user's display name, set through "Set the author name for markup".
+* (added; code, the story's "adds a reply") A reply is posted from the panel card's field with the Post button, plain Enter or Ctrl+Enter; Shift+Enter adds a line; the context menu's "Reply" opens the panel with the item's card selected and the field ready. Test: e2e; each way once; fork tests: `ctrl_enter_posts_a_reply_and_shift_enter_adds_a_line` (`comments.rs:466`) and a new one for plain Enter on the reply field.
+* (added; "Reply: made in the editor as a reply annotation in the file", wb:54; `modify.rs:262-266`) A reply is a Text annotation in the file on the note's page, with /IRT naming the note, the typed /Contents and the author in /T; it is no card of its own and not counted by the header's "Comments N", only by "N replies". Test: e2e; `annots.py` on `save()` bytes; the header texts (`uiInspect`).
+* (added; product owner 2026-11-09, following Acrobat; `modify.rs:236-260` makes the reply, no kind check) A reply can be added to a note, a text markup (highlight, underline, squiggly underline, strike out), a shape (rectangle, oval, line, arrow, polygon, connected lines, cloud) and a freehand drawing, also when the item was made by another user: the card shows the "Add a reply" field and the item's context menu offers "Reply". Test: e2e; `with_markup()` items by "Bob Reviewer" (note, highlight, Square, Ink) plus a polygon made in the editor: one reply each, one thread each.
+* (added; product owner 2026-11-09) Reply is not offered on a text box, on any surface: the selected text box's card shows no "Add a reply" field, its context menu has no "Reply" entry, and the same for a text callout (a FreeText with intent FreeTextCallout in a file made elsewhere). A reply already in a file on a text box is still shown in its thread. Test: e2e; `with_markup()` FreeText selected on the page and from the panel: `uiInspect` has no "Add a reply" field and the `context_menu_labels` (`editor_ui.py`) have no "Reply"; a fixture FreeText with an /IRT reply shows the reply; a FreeText with /IT /FreeTextCallout likewise; fork test on the card and the menu for the FreeText case. Code change in `comments_panel.rs:518` and `menu.rs:91`.
+* (added; `comments_panel.rs:530`) A reply with no text, or only spaces, cannot be posted: Post is disabled and `edit_generation` is unchanged. Test: e2e.
+* (added; `comments_panel.rs:669-699`) A reply can be edited and deleted by its own "..." menu; deleting one reply leaves the note and the other replies, editing keeps its place in the thread and its author. Test: e2e; three replies, delete the second, the first and third stay in order; edit the first: `annots.py` /Contents changed, /T unchanged.
+* (added; `modify.rs:236-270` has no lock check; `modify.rs:301-302`: a locked comment's "text and replies stay editable"; `modify.rs:90-99` for deletion) On a locked note a reply can be added and a reply can be edited; a locked reply cannot be deleted on its own (its menu entry is disabled) and keeps its note undeletable (item 8). Test: e2e; `with_markup()` locked note: add a reply; locked reply: its Delete is disabled.
+* (added; "Honour the restrictions set inside a PDF") Given the PDF file permissions do not allow annotating, the panel offers no "Add a reply" field and the context menu's "Reply" is disabled; the engine refuses `ReplyToAnnotation` (`check_permission`). Test: e2e with the encrypted fixture holding a note: the note selected, no reply field; fork test of the refusal.
 
 ## Epic: Add visible remarks
 
@@ -643,11 +669,19 @@ Capability: Reviewers write remarks directly onto a page where every reader sees
 
 Component: PdfCraft fork
 
-As a reviewer, I want to type a remark directly onto a page, so that it can be read on the page without opening a comment.
+As a reviewer, I want to type a remark directly onto a page, so that it can be read on the page without opening a PDF file comment.
 Acceptance criteria:
 * Given an open document, when the reviewer chooses the text box tool, clicks a place on a page and types text, then the typed text appears on the page at that place.
 * Given an existing text box, when the reviewer edits its text, then the page shows the edited text in place of the earlier text.
 * Text boxes are kept as stated in "Placed objects and corrections are kept in the saved document".
+* (added; mods:389, `fork/hosting.md:31`, `crates/fonts/src/craft.rs:54-56`) Given text in Arabic (right to left), typed into a text box in a build with craft-fonts, the text appears on the page in the Arabic face, shaped (letters joined) and read right to left, the box is sized and wrapped with the Arabic text's own widths, and the annotation is not marked /PCUndrawn. Test: fork test in `crates/annot/src/tests.rs` (skipped when `document_arabic_font()` is none, as `crates/edit/src/tests.rs:1282` does): the appearance of a FreeText with Arabic text embeds a font and `undrawable_text(d)` is none, joining and order checked against the shaper's output; fork test in `tests/it/text_box_arabic.rs`: the box rect measured at creation is wider than the same number of Latin characters would give only where the Arabic widths say so (rect equals the box computed from the Arabic widths within 1 pt); e2e: type one Arabic word as one insertion (Issue 6 was rejected: `keyboard.type` inserts per character), save, open the bytes in a new document, render the page with pypdfium2 (`pixels.py`) and compare the box region with the render of the same box holding "?" characters and with a render of the same word in a reference PDF drawn with the Arabic face: it differs from the first and matches the second within a tolerance; /PCUndrawn is absent in the new document's annotation (`FPDFAnnot_HasKey`).
+* (added; `crates/annot/src/draw.rs:29-34`, the project's rule "never lose work silently") Given text in a script for which the build has no face (a script other than Western European and Arabic, or Arabic in a build without craft-fonts), the text is kept as typed in /Contents, the page shows `?` for those characters, the annotation is marked /PCUndrawn and the editor shows its notice (`docInspect().notice` is set). Test: e2e with a Cyrillic word in a new document; fork test `crates/annot/src/tests.rs:1774-1851` (existing pattern).
+* (added; `composer.rs:88`) Cancel, Escape or Post with no text places nothing. Test: e2e, as item 2.
+* (added; Workspace supports French, `fork/hosting.md:31`) Text with Western European characters, "Revision a faire" written with U+00E9, U+00E8, U+00E7 and U+0153, appears on the page as typed (no `?`), /Contents holds it, and the annotation is not marked /PCUndrawn. Test: e2e, typed as key presses (one key event per character, as a keyboard sends them), a new document per `/PCUndrawn` check; `FPDFAnnot_HasKey`.
+* (added; `modify.rs:200-206`) Editing the text keeps the box's top-left and width; its height follows the lines. Test: e2e; the rect's top-left is the same before and after within 1 pt.
+* (added; "Add or change the explanation of a markup item"; `set_contents`) The text of a text box is its explanation: the panel entry shows it, and changing the explanation from the panel changes the text on the page. Test: e2e; edit through the panel card, screenshot region changes.
+* (added; "Hide upstream functions that overlap Workspace concerns", mods:1036) The Callout and Attach tools are hidden: `runCommand("comment.callout")` and `("comment.attach")` return "is not offered in this editor", and the note group's hotbar flyout and command search list neither. Test: e2e: one test opens each hotbar flyout (note, highlight, draw groups) and compares its labels with the allowlist of `commands.rs:72-92`.
+* (added; "Honour the restrictions set inside a PDF") Given the PDF file permissions do not allow annotating, `runCommand("comment.freetext")` is refused as in item 1. Test: e2e, encrypted fixture.
 
 ## Epic: Sketch and frame content
 
@@ -664,6 +698,8 @@ Acceptance criteria:
 * Given an open document, when the reviewer chooses the ink tool and drags the pointer across a page, then a stroke appears along the path of the pointer.
 * Given a drawn stroke, when the reviewer releases the pointer, then the stroke stays on the page.
 * Ink drawings are kept as stated in "Placed objects and corrections are kept in the saved document".
+* (added; "Hide upstream functions that overlap Workspace concerns", `offered-commands.md`) The editor offers no Freehand-Highlight and no Eraser: `runCommand` of `comment.freehand_highlight` and `comment.eraser` returns "is not offered in this editor", and the quick bar's flyout and command search list no such entry. Test: e2e (`uiInspect` labels, `palette_labels`; the hotbar flyout test of item 3).
+* (added; "Honour the restrictions set inside a PDF") Given the PDF file permissions do not allow annotating, `runCommand("comment.ink")` is refused as in item 1. Test: e2e, encrypted fixture.
 
 ### Feature: Shapes
 
@@ -674,8 +710,11 @@ Component: PdfCraft fork
 As a reviewer, I want to draw shapes on a page, so that I can frame the content I am talking about.
 Acceptance criteria:
 * Given an open document, when the reviewer chooses the rectangle tool and drags from one point to another on a page, then a rectangle appears that spans the dragged area.
-* Given each shape tool the editor provides, when the reviewer chooses it and drags on a page, then the shape appears across the dragged area.
+* Given each shape tool the editor provides that is drawn by dragging (rectangle, oval, line, arrow), when the reviewer chooses it and drags on a page, then the shape appears across the dragged area.
 * Shapes are kept as stated in "Placed objects and corrections are kept in the saved document".
+* (added; `input.rs:486-575`; `offered-commands.md` offers them as "each shape tool the editor provides"; completes the backlog wording) With the polygon, connected lines and cloud tools, clicks place the vertices (a preview follows), and a double-click, Enter, the menu's Complete, or for a polygon or a cloud of at least three points a click on its first point, finishes the shape across the clicked points. Test: e2e; click four points around a paragraph, double-click the last; one Polygon whose rect bounds the four points within 4 pt; the same for connected lines (three points); for the cloud, its /Vertices lie within 4 pt of the clicked points and its rect contains them (a cloud's rect also holds its scallops); the first-point close for polygon and cloud.
+* (added; failure; `paint.rs:288-310`, `create.rs` `rect_for`) A polygon or cloud with fewer than three clicked points, connected lines with fewer than two, a rectangle or oval dragged with a side under 2 pt (a flat drag), a line or arrow shorter than 2 pt, and a click without a drag with the rectangle, oval, line or arrow tool, place nothing and change nothing. Test: e2e; `edit_generation` as before; a flat horizontal drag with the rectangle tool; fork test `drawn_shapes_ignore_slips` (`tools/comments/tests.rs:491-499`) extended.
+* (added; "Honour the restrictions set inside a PDF") Given the PDF file permissions do not allow annotating, each of the seven commands is refused as in item 1. Test: e2e, encrypted fixture.
 
 ## Epic: Correct wording in place
 
@@ -712,7 +751,7 @@ Acceptance criteria:
 * Given a placed image, when the reviewer selects it later, then it can still be edited as stated in "Move and resize a placed object".
 * Added images are kept as stated in "Placed objects and corrections are kept in the saved document".
 * (added; code `content_ui.rs:915`; "Run commands from the client": the editor offers commands that apply to working in Workspace) In the web build, Add image (the Edit panel row, command search) opens the browser's file chooser for an image and, once a file is chosen, places it; the message at `content_ui.rs:915` is shown nowhere. Test: e2e as above; `runCommand("edit.image")` is accepted but cannot open a chooser without a user gesture (Playwright clicks carry one, `page.evaluate` does not, inference), so only acceptance is checked for that path. The placement itself: fork test `tests/it/content.rs`, `add_image("p.png", bytes)` on a one-page document gives one added image on page 0 and `can_undo` true.
-* (added; "Honour the restrictions set inside a PDF", mods:707-716) Given the document's permissions do not allow modification, Add image is unavailable and `runCommand("edit.image")` returns `{ ok: false, error: "command edit.image is not available now" }`. Test: e2e with `pdfs.build(encrypt=(owner, user, P))` with the modify bit cleared.
+* (added; "Honour the restrictions set inside a PDF", mods:707-716) Given the PDF file permissions do not allow modification, Add image is unavailable and `runCommand("edit.image")` returns `{ ok: false, error: "command edit.image is not available now" }`. Test: e2e with `pdfs.build(encrypt=(owner, user, P))` with the modify bit cleared.
 * (added; hosting.md, "State the client reads") After the placement `getState().can_undo` is true and `edit_generation` differs; one `runCommand("edit.undo")` removes the image. Test: e2e.
 * (added; product owner, 2026-11-08; as "Place the drawn signature image") After a file is chosen, the editor shows the image at the pointer at its natural size, and the reviewer's click on a page places it at that spot; given the reviewer cancels before clicking, nothing is placed and the document is unchanged. Test: e2e; screenshot region check at the click point; Esc before the click leaves `edit_generation` unchanged.
 * (added; product owner, 2026-11-08; backlog "the accepted image formats are those the editor can place") The file chooser offers only the image formats the editor can place; a file in another format, such as DICOM, cannot be chosen. Test: e2e; the accept list of the chooser's input.
@@ -826,6 +865,9 @@ Acceptance criteria:
 * Given the comments panel is open, when the reviewer adds a markup item, then the panel gains an entry for it. When the reviewer deletes a markup item, the panel loses its entry.
 * The author shown for each entry is the logged-in user's display name of the user who made it, set through "Set the author name for markup".
 * Given the reviewer chooses an entry in the comments panel, then the markup item's page comes into view, the item is scrolled into the document view and it is selected.
+* (added; "Markup item" in the Terms, mods:490-504) One entry per markup item for each of the five kinds (note, text markup, text box, ink, shape): a highlight with two lines is one entry, a note's Popup annotation is no entry, a reply is shown in its note's thread and is no entry of its own, and each entry names its kind (`kind_label`, `:41-49`). Test: e2e; `with_markup()` plus a two-line highlight: card count equals the item count; the labels are those.
+* (added; "List all markup in the comments panel": "lists one entry for each markup item"; links and form fields are no markup, `info.rs:61-63`) Links and form fields are not entries. Test: e2e; `linked()` of `pdfs.py` (four links): "No comments yet."; a `text_field=True` fixture: none.
+* (added; "Honour the restrictions set inside a PDF") Given the PDF file permissions do not allow annotating, the panel lists the markup items but has no "Add a comment" box and offers no edit or delete (`allowed`, `comments_panel.rs:132, 420-430`). Test: e2e with the encrypted fixture holding a Square: one card, no "Add a comment" field, no "More" button on the selected card.
 
 ## Epic: Explain markup
 
@@ -843,6 +885,13 @@ Acceptance criteria:
 * Given a markup item with an explanation, when the reviewer changes the explanation, then the comments panel entry shows the new explanation and not the earlier one.
 * Given one markup item of each kind (note, text markup, text box, ink drawing, shape), when the reviewer adds an explanation to each, then each one keeps its own explanation.
 * This applies to markup made by other users: any reviewer who may edit the document can change the explanation of any markup item, whoever made it.
+* (added; the four ways of Today, "Add or change the explanation") The explanation can be added or changed from the panel card (double-click and "More" > Edit), the item's context menu ("Edit text...") and a double-click on the item; Cancel and Escape leave it unchanged (`edit_generation` as before). Test: e2e; each way once; then Cancel and Escape.
+* (added; "any reviewer who may edit the document can change the explanation of any markup item"; `modify.rs:164-206, 301-302`) A locked item (flag Locked) can still have its explanation changed; the flag LockedContents is not honoured by the editor, recorded here as an implementing decision. Test: e2e; `with_markup()` locked note: the change succeeds.
+* (added; `composer.rs:88`) Saving an empty explanation clears it: the card shows the kind in italics and /Contents is empty. Test: e2e.
+* (added; Workspace's languages, `fork/hosting.md:31`; `set_contents`) An explanation in any script is kept exactly as typed in /Contents: "Revision a faire" with U+00E9 and an Arabic word (typed as one insertion) round-trip through `save()` and reopen, and the card shows the text. How the panel draws Arabic is the interface font's matter (Issue 3, fixed by craft-fonts). Test: e2e; /Contents compared with the typed string.
+* (added; mods:1033, 1036; implementing decision) The card menu and the item's context menu do not offer "Set status", "Mark with checkmark", "Colour", "Copy text" and "Make Current Properties Default"; they offer "Edit text...", "Reply" (not on a text box, item 11), "Delete" and "Properties...". Test: e2e; select an item, open the card's "More" menu and the item's context menu, `menu_labels`/`context_menu_labels` (`editor_ui.py`) contain the four wanted entries and none of the five. Code change: `comments_panel.rs:588-640`, `menu.rs`.
+* (added; "the reviewer cannot change it in the editor", "Set the author name for markup") The Properties dialog of a markup item shows its author and the field is read-only after `setAuthor` (`dialogs/comment_props.rs:477`). Test: e2e; fork test `tests/it/comments.rs` (the field is disabled when `author_locked`).
+* (added; "Honour the restrictions set inside a PDF") Given the PDF file permissions do not allow annotating, the panel's Edit, the context menu's "Edit text..." and a double-click offer no editing; the engine refuses `SetAnnotationContents` (`check_permission`, `session/editing.rs`). Test: fork test with an encrypted PDF holding a note (the refusal, the disabled entries); e2e with the encrypted fixture: no Edit entry, no editor opens.
 
 ## Epic: Remove mistaken markup
 
@@ -858,7 +907,12 @@ As a reviewer, I want to delete a markup item, so that markup I no longer want d
 Acceptance criteria:
 * Given a selected markup item, when the reviewer deletes it, then it disappears from the page and from the comments panel.
 * Given a deleted markup item, when the document is saved and opened again, then the markup item is not present.
-* This applies to markup made by other users: any reviewer who may edit the document can delete any markup item, whoever made it; mistakes are recovered through "Undo and redo markup changes" and "Open an earlier version".
+* This applies to markup made by other users: any reviewer who may edit the document can delete any markup item that is not locked, whoever made it; mistakes are recovered through "Undo and redo markup changes" and "Open an earlier version".
+* (added; the Locked flag the author set inside the file, "Honour the restrictions set inside a PDF"; `modify.rs:82-100`) A locked item cannot be deleted by the key, the context menu or the card menu: the menu entries are disabled, the Delete key does nothing (the selection stays and no notice is shown), and nothing changes (`edit_generation`, `can_undo` as before). Test: e2e; `with_markup()` locked note: `annots.py` still lists it, `selected_comment` still names it; fork test of the key path. Code change: `keys` asks `deletable` before building the edit.
+* (added; `modify.rs:90-99`) A note with a locked reply cannot be deleted either: the note's Delete is disabled in both menus and the Delete key does nothing. Test: e2e; `with_markup()` note with a locked reply.
+* (added; "Delete a markup item"; `modify.rs:72-77`) Deleting a note that has replies deletes the replies with it and leaves no Popup: the card and its thread are gone, and the page lists no annotation of the note. One `edit.undo` brings the note and its replies back. Test: e2e; the note with two replies; `annots_all` (with Popup) lists none of them.
+* (added; "Honour the restrictions set inside a PDF") Given the PDF file permissions do not allow annotating, the Delete key does nothing and the menus' Delete is disabled. Test: e2e with the encrypted fixture holding a Square: it stays.
+* (added; `input.rs:694`) Backspace or Delete typed in a text field (the explanation editor, the composer, the find bar) edits the text and does not delete the selected item. Test: e2e; open the editor on a selected item, press Backspace: the item stays.
 
 #### Story: Undo and redo markup changes
 
@@ -869,6 +923,11 @@ Acceptance criteria:
 * Given the reviewer deleted a markup item that had an explanation and replies, when the reviewer undoes, then the markup item returns with its explanation and replies.
 * Given an undone deletion, when the reviewer redoes, then the markup item is removed again.
 * Given the reviewer added a highlight, when the reviewer undoes, then the highlight is removed.
+* (added; hosting.md, "State the client reads"; the one place the criterion is stated for all items) After each markup change of items 1 to 5, 7, 8 and 11 `getState().can_undo` is true, `edit_generation` differs from before and one `pdfcraft:state` was sent for it; `can_undo` is true exactly when an edit can be undone and `can_redo` exactly when an undone edit can be redone; after each undo or redo `edit_generation` differs from before and one `pdfcraft:state` is sent. Test: e2e; the sequence add, undo, redo with `getState()` and the event log (`window.__pdfcraft`) at each step, for a table of the operations of those items, each undone and redone and compared by screenshot region and `annots.py`; each undo takes back exactly one operation (one step per change).
+* (added; `session/editing.rs:192`) A new markup change after an undo removes what could be redone: `can_redo` is false and `runCommand("edit.redo")` is refused with `{ ok: false, error: "command edit.redo is not available now" ... }`; with nothing to undo `edit.undo` is refused likewise. Test: e2e; fork test `tests/it/editing.rs`.
+* (added; `commands.rs:110-111`, the client's buttons, hosting.md) Undo and redo run from `runCommand`, from Ctrl+Z and Ctrl+Shift+Z with the canvas focused, and from the client's Undo and Redo buttons, with the same result; the Stub's buttons are enabled exactly while `can_undo` / `can_redo`. Test: e2e; each way once on the same operation.
+* (added; `editing.rs:383-386`) After an undo or redo no markup item is selected (`selected_comment` null) and the panel's editor is closed. Test: e2e.
+* (added; hosting.md "Save", `session/save.rs:66-92`) After `save()` the markup can still be undone; the undo makes `getState().edit_generation` differ from the `edit_generation` of the save result (so the client shows unsaved changes), and a second `save()` returns bytes whose last revision has no such markup (`annots.py` reads the page's annotation list as PDFium loads it; the earlier revision in the incremental update still holds it). Test: e2e.
 
 ## Epic: Mark document status with stamps
 
@@ -1097,7 +1156,7 @@ Acceptance criteria:
 * Given no text is selected, when the user adds a bookmark, then a bookmark titled "Untitled" is added, and it opens the current page at the position at the top of the document view.
 * Given text is selected on a page, when the user adds a bookmark, then the bookmark is titled with the selected text on one line, at most 128 characters, and it opens the page at the top-left of the selection.
 * Given a bookmark has just been added, when the Bookmarks panel shows it, then its title is open for renaming as defined in "Rename a bookmark".
-* Given the document permissions do not allow assembly or the document is read-only, when the user tries to add a bookmark, then the action is unavailable.
+* Given the PDF file permissions do not allow assembly or the document is read-only, when the user tries to add a bookmark, then the action is unavailable.
 * (added; "Run commands from the client") `runCommand("bookmark.add")`, the panel button and Ctrl+B make the same bookmark (title and destination). Test: e2e.
 * (added; "Save and return the bytes to the client", mods:`Save and return`: every edit made up to the call) `save()` bytes contain the outline entry with the title; reopening them lists it. Test: e2e.
 * (added; hosting.md "State the client reads") After the add `edit_generation` differs, `can_undo` is true and one undo removes the bookmark. Test: e2e.
@@ -1450,8 +1509,8 @@ Component: Workspace and PdfCraft fork
 
 As a user, I want Workspace to respect the restrictions an author set inside a PDF, so that I am not offered actions the document forbids.
 Acceptance criteria:
-* Given a document whose author restricted it, when it is opened in Workspace, then the editor shows its notice about the restrictions and honours the document permissions, as the editor already does.
-* Workspace does not offer an action that the document permissions forbid.
+* Given a document whose author restricted it, when it is opened in Workspace, then the editor shows its notice about the restrictions and honours the PDF file permissions, as the editor already does.
+* Workspace does not offer an action that the PDF file permissions forbid.
 * Given an encrypted document is open in the editor and has been edited, when "Save and return the bytes to the client" returns the bytes, then the saved document stays encrypted as the document was.
 * Workspace opens password-protected documents as "Enter a password for a protected document" defines.
 
@@ -1463,7 +1522,7 @@ As a user, I want to enter the password of a protected stored document or own fi
 Acceptance criteria:
 * Given a document requires a password, then Workspace asks the user for the password and passes it only to the editor; the password never goes to the backend, to storage or to logs.
 * Given an encrypted file is among the inputs of "Combine several files in chosen order", then it is unlocked first in the same way.
-* Given the user enters the owner password, then the editor lifts the document permissions as it already does, and Workspace records that this happened: the user, the document, the version and the time; the password itself is never recorded.
+* Given the user enters the owner password, then the editor lifts the PDF file permissions as it already does, and Workspace records that this happened: the user, the document, the version and the time; the password itself is never recorded.
 * Lifting a PDF's restrictions grants no read permission and no save permission of the organisation.
 * Given the user enters no password or a wrong one, then "Report why a document could not be opened" applies with the cause "password required or wrong".
 
@@ -1609,7 +1668,7 @@ Acceptance criteria:
 * (added; "Save and return the bytes to the client") Given no document is open the result is a failure that says so. Test: e2e.
 * (added; `files.rs:635`) Given the bytes are not a PDF or cannot be read (empty, random or truncated), the result is a failure with the error text and the document is unchanged (`page_count`, `edit_generation`, `can_undo`). Test: e2e.
 * (added; product owner, 2026-11-08; "Report why a document could not be opened", "Enter a password for a protected document") The function takes an optional password for the other PDF. Given the other PDF needs a password and none or a wrong one is given, the result is a "password required" failure, distinct from every other failure, and the document is unchanged; Workspace asks the user for the password and calls the function again. With the right password the pages are inserted. The password is used only by the editor and appears in no request, result, console message or state event. Test: e2e with an other PDF that has a user password: without it, with a wrong one, with the right one.
-* (added; "Honour the restrictions set inside a PDF"; `edit/run.rs:13-36`) Given the document's permissions do not allow assembly the result is a failure with the reason and the document is unchanged. Test: e2e with the encrypted fixture (assemble bit cleared).
+* (added; "Honour the restrictions set inside a PDF"; `edit/run.rs:13-36`) Given the PDF file permissions do not allow assembly the result is a failure with the reason and the document is unchanged. Test: e2e with the encrypted fixture (assemble bit cleared).
 * (added; "Report the page count to the client") After the call `getState().page_count` is N+M, `pdfcraft:state` was sent once, and `getState().info` (title, author, subject, keywords) is the open document's, not the other PDF's. Test: e2e; the other PDF has a title (`build(title=...)`).
 * (added; "Undo and redo page changes") The insertion is one undo step: one `runCommand("edit.undo")` returns N pages. Test: e2e.
 * (added; `files.rs:660-664`) After the call the inserted pages are the selected pages, as after the editor's own insert. Test: e2e, `docInspect().active.selected_pages`.
@@ -1666,7 +1725,7 @@ Acceptance criteria:
 * (added; mods:855, `edit/run.rs:766-777`) Natural size is pixels * 72 / dpi (72 dpi without one), within 80 percent of the page; the preview and the placed image have the same size. Test: e2e with the 480 x 180 px PNG; fork test for the size rule.
 * (added; mods:431, 444, 855) The placed image is an added image: it has no comments panel entry and is moved and resized as an added image. Test: e2e, comments panel rows unchanged after the placement.
 * (added; "Save and return the bytes to the client": no document open) Given no document is open the result is a failure that says so and nothing starts. Test: e2e before any document is opened.
-* (added; "Honour the restrictions set inside a PDF") Given the document's permissions do not allow the change (the modify bit for `Edit::AddImage`), the result is a failure with the reason. Test: e2e with the encrypted fixture.
+* (added; "Honour the restrictions set inside a PDF") Given the PDF file permissions do not allow the change (the modify bit for `Edit::AddImage`), the result is a failure with the reason. Test: e2e with the encrypted fixture.
 * (added; failure pattern) Bytes that are not an image, an empty array or an oversized image give `{ ok: false, error }` with the editor's text, nothing starts, `edit_generation` is unchanged. Test: e2e.
 * (added; hosting.md, "State the client reads") After the click `edit_generation` differs and `pdfcraft:state` was sent once for it. Test: e2e, event count.
 
@@ -1730,7 +1789,7 @@ Acceptance criteria:
 
 Component: Workspace and PdfCraft fork
 
-The fork exports a function that sets the author name, so that markup items and replies carry the logged-in user's display name as "Place a note at a point on a page", "Reply to a comment" and "List all markup in the comments panel" require.
+The fork exports a function that sets the author name, so that markup items and replies carry the logged-in user's display name as "Place a note at a point on a page", "Reply to a PDF file comment" and "List all markup in the comments panel" require.
 Acceptance criteria:
 * The exported JS API has a function that takes a display name and sets it as the author name.
 * After the call, every markup item and reply the user creates records that name as its author.
@@ -1745,7 +1804,7 @@ Acceptance criteria:
 * The exported JS API exposes can_undo, can_redo, permissions, is_signed and edit_generation, taken from the engine.
 * can_undo is true exactly when the editor has an edit to undo; can_redo is true exactly when the editor has an undone edit to redo.
 * edit_generation has a different value after each edit of the open document than before it.
-* permissions reports the open document's document permissions as the engine exposes them.
+* permissions reports the open document's PDF file permissions as the engine exposes them.
 * is_signed reports whether the open document is signed: true for a document carrying a digital signature, false for a document carrying no signature.
 * When a different document is opened in the editor, then the values returned are those of the newly opened document.
 * A further state value that an item of this backlog needs for a Workspace control is added through an item with Component "Workspace and PdfCraft fork".
@@ -1870,4 +1929,6 @@ Acceptance criteria:
 
 ## Open points
 
-None.
+* Mixed Arabic and Latin text in a text box: its alignment and wrapping ("Write a remark in a text box on a page").
+* The PDF LockedContents flag is not honoured by the editor ("Add or change the explanation of a markup item").
+* A reply to a reply is not offered ("Reply to a PDF file comment").

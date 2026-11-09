@@ -7,6 +7,13 @@ status: draft
 
 # Issues
 
+## How an issue moves
+- Opened: by whoever sees it (the product owner, the integrating session, a worker, the product owner's session). The opener writes what was seen, how, the steps, and the backlog criterion or upstream behaviour it goes against; a suspected cause is marked unconfirmed.
+- Confirmed or rejected: on evidence independent of the opener's: a different method, with real input or a direct look, never the same tool run again. The product owner's own observation confirms or rejects on its own. A visual issue can be confirmed by the product owner's Cowork session (the Claude desktop app's browser, a real browser separate from the test tools) looking at the Mock/Stub; an input issue needs the product owner's real keyboard or input method. Rejected when it does not reproduce, is a quirk of a test tool, or is correct behaviour by the criteria.
+- Planned or declined: a confirmed issue becomes acceptance criteria of an item and is picked for a batch like any other work; declined only with a reason from the sources.
+- Fixed, then closed: closed when the criterion's test passes and the fix is verified the same way it was confirmed: a visual issue by the product owner or the Cowork session looking at the fixed build, an input issue by the product owner's real input.
+- Each issue's Status names its state, who moved it there, and when.
+
 ## 1. Opening another document does not show it in the editor
 
 - Found: 2026-11-06, in the Mock/Stub (`workspace/`), with PdfCraft's existing WASM build (`apps/pdfcraft-web`, fork at `f42fda73`).
@@ -130,7 +137,7 @@ With continuous scrolling, Control+Page Down and Control+Page Up step one page w
 The e2e key test waits for each step before sending the next key (`wait_until` in `workspace/tests/conftest.py`), so it does not send keys faster than frames. No test sends a key and the Ctrl release in one frame.
 
 ### Status
-Open. Only keys sent faster than frames trigger it; a person's Ctrl release comes tens of milliseconds after the key. Not changed: upstream key handling, and no criterion of the backlog requires it.
+Rejected, 2026-11-09, by the product owner's session: not reproduced. An independent agent, working from the steps only, sent Control+Page Down and Control+Page Up as browser key events on an 8-page document in continuous scrolling, 60 runs: Ctrl released 30, 60, 100 and 200 ms after the key, and all four events back to back; every run stepped exactly one page, forward and back. Not covered: a partial scroll within one page (one page filled the view), other zooms and layouts.
 
 ## 5. The Print dialog does not fit a small editor area, and its Print button cannot be reached
 
@@ -160,7 +167,7 @@ Investigated by worker-print-dialog-inspect (Sonnet, read only), 2026-11-09. Ups
 `workspace/tests/test_item_print.py` uses a 1700 x 1300 window, in which the dialog fits. No test checks the dialog at a smaller size.
 
 ### Status
-Open. Whether the dialog must fit a smaller editor area is the product owner's decision.
+Closed, 2026-11-09: fixed with "Print the document" (batch 3; the dialog body scrolls, its buttons stay reachable at any editor area size); verified by the product owner in the Mock/Stub: the Print dialog shows its scroll.
 
 ## 6. Characters inserted one at a time end up in reverse order in a text field
 
@@ -185,4 +192,86 @@ Not investigated. Probably the cursor is not moved past text that arrives as an 
 `test_item_search.py` inserts a non-ASCII query as one insertion, as an input method commits a word. Not checked with a real Arabic keyboard layout or a real input method, which may deliver characters differently.
 
 ### Status
-Open. Whether a person typing with an Arabic layout or a CJK input method sees it is not known; the product owner can check by hand.
+Rejected, 2026-11-09, by the product owner's session: not reproduced with input that reaches the page as a keyboard or an input method does. An independent agent, working from the steps only, typed Arabic as key presses (CDP Input.dispatchKeyEvent, one character at a time: "نص" and "بحث" arrived in typed order) and Japanese as a composition (CDP Input.imeSetComposition, then Input.insertText: "検索" arrived in order, not doubled); it reproduces only with Playwright's keyboard.type, which inserts each character as text. Not checked with a physical Arabic keyboard or a real input method, one run per case. Declined, 2026-11-09, by the product owner, on the product owner's own check with a real Arabic keyboard: no problem. The agents' reproductions used the same kind of emulated input as the opener and do not count.
+
+## 7. Text inserted in several pieces ends up with the pieces in reverse order
+
+- Found: 2026-11-09, in the Mock/Stub (`workspace/`), by worker-e2e-markup while writing `workspace/tests/test_item_text_box.py`, with the WASM built on 2026-11-09 at 19:31 (branch `wasm-bundle`, uncommitted batch 3 changes).
+- Component: PdfCraft fork web build (text input); not investigated.
+
+### Observed
+In the text box composer, four successive text insertions "Révision", " ", "très", "française" (Playwright `page.keyboard.insert_text`, one call per piece) gave " française trèsRévision": each inserted piece went in front of the previous one. One insertion of a whole sentence, or of one Arabic word, arrives as typed.
+
+### Steps
+1. Open a document, choose the text box tool, click on the page.
+2. In Playwright, call `page.keyboard.insert_text` once per word: "Révision", " ", "très", "française".
+3. The composer holds " française trèsRévision".
+
+### Cause
+Not investigated. Probably related to rejected Issue 6: the caret does not advance after an inserted text. Issue 6 was checked with one input method commit only; an input method that commits word by word sends several insertions in a row, which this case resembles. Unconfirmed: not checked with a real input method.
+
+### Backlog
+- "Write a remark in a text box on a page": the criterion with Western European characters ("each word typed as one insertion").
+
+### Tests
+`test_item_text_box.py::test_c7_western_european_characters_appear_as_typed` now types the sentence as key presses, one CDP `Input.dispatchKeyEvent` keyDown (with `text`) and keyUp per character, as the product owner's session asked; the page receives keydown, keypress, beforeinput (insertText), input and keyup per character, and the composer holds "Révision très française du cœur" in order (worker-e2e-markup, 2026-11-09). So key presses do not show the reversal; successive input method commits are not checked by this test.
+
+### Status
+Declined, 2026-11-09, by the product owner's session. An agent reproduced it in the text box and the find bar (several emulated input-method commits arrive in reverse order; keyboard key presses arrive in order), but with the same kind of emulated input as the opener, so it is not an independent confirmation. Workspace supports English, French and Arabic, all typed on keyboards, and the product owner's check with a real Arabic keyboard found no problem (Issue 6). Revisit if a language typed with an input method is supported.
+
+## 8. The placeholder text of the command search and the find field is left aligned in Arabic
+
+- Found: 2026-11-09, by the product owner, in the Mock/Stub with the interface language set to Arabic.
+- Component: PdfCraft fork (the editor's text fields).
+
+### Observed
+With the interface in Arabic (right to left), the placeholder (hint) text of the command search field and of the find field is drawn aligned to the left, where right-to-left text is aligned to the right.
+
+### Steps
+1. Open the Mock/Stub, log in, choose Arabic in the language selector, open a document.
+2. Open the command search, and open the find bar (Ctrl+F after clicking the pages).
+3. The placeholder text of each empty field sits at the left edge.
+
+### Backlog
+- "Set the interface language of the editor"; Workspace supports Arabic, right to left (`fork/hosting.md`).
+
+### Status
+Confirmed, 2026-11-09: seen by the product owner; and independently by the product owner's Cowork session in the Claude desktop app's browser (Mock/Stub on port 8055, Arabic): the command search placeholder "البحث في الأدوات والأوامر..." and the find field placeholder "البحث عن نص" both start at the left edge next to the magnifier. It also saw the command search's result rows laid out left to right (icon left, shortcut right) in Arabic. To be planned into a batch.
+
+## 9. Text typed into the find field appears in a new text box
+
+- Found: 2026-11-09, by the product owner's Cowork session (Claude desktop app's browser), in the Mock/Stub on port 8055, while checking Issues 6 and 7.
+- Component: PdfCraft fork (the editor's text input).
+
+### Observed
+After the word "検索" was typed into the find field (and the field cleared and closed), a new text box was created with the text box tool and "Révision", " ", "très", " ", "française" were typed into it: the box showed "française très Révision検索". The pieces arrive reversed (as in Issue 7, declined) and the find field's earlier text is appended at the end, although the box looked empty before typing. The observer's tool sends each typing action as one text insertion (no key events), so this may be an effect of that tool; the observer read the focused element as one small hidden input shared by the fields (not checked in the code).
+
+### Steps
+1. Open a document, click the page, Ctrl+F, type a word into the find field, clear it, close the find bar.
+2. Choose the text box tool (`window.pdfcraft.runCommand("comment.freetext")`), click on the page, type a sentence.
+3. Look at the box's text before posting.
+
+### Backlog
+- "Write a remark in a text box on a page".
+
+### Status
+Opened, 2026-11-09, by the product owner's Cowork session. Not confirmed: needs a check with a real keyboard.
+
+
+## 10. The reply field has no accessible name
+
+- Found: 2026-11-09, by the integrating session, while testing "Reply to a PDF file comment" (batch 3) through the editor's accessibility tree (`uiInspect`).
+- Component: PdfCraft fork (the comments panel).
+
+### Observed
+The "Add a reply" field on a markup item's card has no accessible name: its hint text is not in the accessibility tree, so a screen reader announces an unnamed text field. The "Add a comment" box has a name.
+
+### Steps
+1. Open a document, place a note, open the comments panel.
+2. Inspect the accessibility tree (`uiInspect` on a page opened with `?control`, or a screen reader): the reply field is a text input without a name.
+
+### Backlog
+- No criterion of the backlog names it. It fails WCAG 2.2 success criterion 4.1.2 "Name, Role, Value" (a user interface component has a name that assistive technology can read).
+
+### Status
+Opened, 2026-11-09, by the integrating session. Not confirmed.

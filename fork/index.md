@@ -42,6 +42,10 @@ This folder is the fork's own knowledge, in Open Knowledge Format (OKF) v0.2. Ev
 - [Tab strip hidden in the web build](/changes/tab-strip-hidden.md)
 - [Page navigation works without the canvas focus in the web build](/changes/wheel-without-canvas-focus.md)
 - [Upstream AGENTS.md and CLAUDE.md removed](/changes/upstream-agent-files-removed.md)
+- [Markup tools and keys follow the criteria](/changes/markup-tools.md)
+- [The Print dialog fits the editor area](/changes/print-dialog-fit.md)
+- [Arabic text in a text box is drawn in the Arabic face](/changes/text-box-arabic.md)
+- [The comments panel and menus offer what the criteria allow](/changes/markup-menus.md)
 
 ## Upstream documents
 - [README.md](/upstream/readme.md)
