@@ -620,7 +620,7 @@ fn card(ui: &mut egui::Ui, view: &mut DocView, context: CardContext<'_>) -> Opti
                 view.comments.default_request = Some((a.page, a.index));
                 ui.close();
             }
-            if ui.button(tl!("Copy comment")).clicked() {
+            if crate::commands::offered("comment.copy") && ui.button(tl!("Copy comment")).clicked() {
                 // The card's comment alone (the page's menu copies the whole selection).
                 view.comments.select_only(key);
                 view.comments.copy_request = true;
@@ -778,16 +778,20 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
             ("comment.export", tl!("Export all to data file…")),
             ("comment.import", tl!("Import comments…")),
         ] {
-            if ui.button(tl!(label)).clicked() {
+            // A command the build does not offer (the web build: fork change
+            // "interface-parts-hidden") is not in the menu.
+            if crate::commands::offered(id) && ui.button(tl!(label)).clicked() {
                 command = Some(id);
                 ui.close();
             }
         }
         // Into the pages, for good once saved: apart from the list's other commands.
-        ui.separator();
-        if ui.button(tl!("Flatten comments")).clicked() {
-            command = Some("comment.flatten");
-            ui.close();
+        if crate::commands::offered("comment.flatten") {
+            ui.separator();
+            if ui.button(tl!("Flatten comments")).clicked() {
+                command = Some("comment.flatten");
+                ui.close();
+            }
         }
     });
     let filter = icons::button(ui, "filter", 26.0, active, tl!("Filter comments"));

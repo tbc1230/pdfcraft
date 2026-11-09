@@ -12,6 +12,7 @@ mod commands;
 mod control;
 mod files;
 mod frame;
+pub(crate) mod host_calls;
 mod input;
 mod keys;
 mod links;
@@ -69,14 +70,17 @@ impl PdfCraftApp {
             views: Vec::new(),
             closed_tabs: Vec::new(),
             active: None,
-            mode: Mode::AllTools,
-            default_mode: Mode::AllTools,
+            // The web build starts in Edit, the workspace that shows the document with the Tools
+            // pane of the listed groups; it has no All tools workspace (fork change
+            // "interface-parts-hidden").
+            mode: crate::panels::default_mode_in(cfg!(target_arch = "wasm32"), Mode::AllTools),
+            default_mode: crate::panels::default_mode_in(cfg!(target_arch = "wasm32"), Mode::AllTools),
             view_defaults: Default::default(),
             units: Default::default(),
             blank_paper: crate::paper::Paper::system(),
             date_format_draft: None,
             mode_override: None,
-            left: LeftPanel::AllTools,
+            left: crate::panels::tools_home(),
             side_panels: Default::default(),
             // Workspace: the web build starts with the All tools sidebar hidden.
             left_open: cfg!(not(target_arch = "wasm32")),
@@ -171,11 +175,18 @@ impl PdfCraftApp {
             inbox: Default::default(),
             startup_inbox: Default::default(),
             startup_superseded: false,
+            author_inbox: Default::default(),
+            theme_inbox: Default::default(),
+            author_locked: false,
+            language_inbox: Default::default(),
             failed_inbox: Default::default(),
             unsaved_flag: Default::default(),
             os_events: None,
             host_save: None,
             host_dirty: None,
+            host_calls: Default::default(),
+            host_state: None,
+            host_state_last: None,
             close_request: None,
             save_prompt_button: Default::default(),
             save_prompt_seen: false,
@@ -351,6 +362,13 @@ impl PdfCraftApp {
             || self.updates.open
     }
 
+    /// Whether a running middle-button scroll must stop: a modal or the palette is open, or, on
+    /// the desktop, the window lost focus. In a browser the canvas not holding the keyboard focus
+    /// is no reason to stop it; the pointer leaving the pages or a click ends it.
+    fn middle_scroll_stops(&self, ctx: &egui::Context) -> bool {
+        self.modal_open() || self.palette_open || (!cfg!(target_arch = "wasm32") && !ctx.input(|i| i.focused))
+    }
+
     /// Show `msg` in the toast now, in place of whatever it showed. Script messages still waiting
     /// show after it.
     pub fn notify(&mut self, msg: impl Into<String>) {
@@ -490,6 +508,11 @@ impl eframe::App for PdfCraftApp {
                 self.fonts_cjk = cjk;
             }
         }
+        // A theme the embedding page set; `sync_theme` below applies it.
+        let host_theme = self.theme_inbox.lock().ok().and_then(|mut t| t.take());
+        if let Some(preference) = host_theme {
+            self.theme_preference = preference;
+        }
         self.sync_theme(ctx);
         let native = ctx.native_pixels_per_point().unwrap_or(1.0);
         ui_scale::sync(ctx, ui_scale::zoom(self.ui_scale, self.system_text_scale, native), &mut self.ui_scale_applied);
@@ -521,6 +544,15 @@ impl eframe::App for PdfCraftApp {
                 self.open_dropped(f, ctx);
             }
         }
+        let author = self.author_inbox.lock().ok().and_then(|mut a| a.take());
+        if let Some(name) = author {
+            self.set_author(&name);
+        }
+        // The host's interface language (`window.pdfcraft.setLanguage`); `logic` applies it to the catalogs on this same frame.
+        let language = self.language_inbox.lock().ok().and_then(|mut l| l.take());
+        if let Some(code) = language.as_deref().and_then(i18n::normalize_pref) {
+            self.language = code.to_string();
+        }
         let arrived: Vec<(String, Vec<u8>)> = self.inbox.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
         for (name, bytes) in arrived {
             if let Err(e) = self.open_bytes(&name, None, bytes) {
@@ -543,7 +575,8 @@ impl eframe::App for PdfCraftApp {
         {
             let startup = self.startup_inbox.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
             for (name, bytes) in startup {
-                let activate = !self.startup_superseded;
+                // Web build: this queue also carries documents the host opens, which must be shown.
+                let activate = !self.startup_superseded || cfg!(target_arch = "wasm32");
                 if let Err(e) = self.open_bytes_with_focus(&name, None, bytes, activate) {
                     self.notify_fmt("Couldn't open {name}: {e}", &[("name", &name), ("e", &e)]);
                 }
@@ -580,6 +613,8 @@ impl eframe::App for PdfCraftApp {
             control.tick(ctx, self);
             self.control = Some(control);
         }
+        // The page's save and command calls, and the state it reads (`host_calls`).
+        self.serve_host_calls();
         self.guard_quit(ctx);
         // macOS: quit through `terminate:` instead of dropping the window (Touch Bar crash, #1136).
         #[cfg(target_os = "macos")]
@@ -608,9 +643,10 @@ impl eframe::App for PdfCraftApp {
         // Scrolling and group-drag previews are transient: never resume after changing tabs,
         // opening a modal/palette, or returning to a window that lost focus.
         let blocked = self.modal_open() || self.palette_open || !ctx.input(|i| i.focused);
+        let cancels = self.middle_scroll_stops(ctx);
         for (index, view) in self.views.iter_mut().enumerate() {
             view.objects.set_input_blocked(blocked || self.active != Some(index));
-            if blocked || self.active != Some(index) {
+            if cancels || self.active != Some(index) {
                 view.auto_scroll.cancel();
             }
         }
@@ -745,5 +781,7 @@ impl eframe::App for PdfCraftApp {
             control.finish_frame(&ctx, self);
             self.control = Some(control);
         }
+        // The state the page reads, after everything this frame did.
+        self.report_host_state();
     }
 }

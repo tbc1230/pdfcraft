@@ -24,6 +24,20 @@ fn page_size_hint_zone_is_the_bottom_left_quadrant() {
 use super::*;
 
 #[test]
+fn in_a_browser_the_wheel_works_with_the_pointer_over_the_pages_without_the_canvas_focus() {
+    // The browser reports no focus while Workspace's own controls hold it.
+    assert!(navigation_has_focus(false, true, true));
+    assert!(!navigation_has_focus(false, false, true), "pointer elsewhere");
+    assert!(navigation_has_focus(true, false, true), "canvas focused");
+}
+
+#[test]
+fn on_the_desktop_an_unfocused_window_does_not_navigate() {
+    assert!(!navigation_has_focus(false, true, false));
+    assert!(navigation_has_focus(true, true, false));
+}
+
+#[test]
 fn typed_zoom_percentages_parse() {
     for (typed, zoom) in [("150", 1.5), ("150%", 1.5), (" 62.5 % ", 0.625), ("6400%", 64.0)] {
         assert_eq!(DocView::parse_zoom_percent(typed), Some(zoom), "{typed}");

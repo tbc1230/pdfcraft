@@ -11,6 +11,13 @@ use crate::widgets;
 /// Glyphs of context shown on each side of a match.
 const CONTEXT: usize = 36;
 
+/// The most results listed. Only the rows in view are laid out, so the cap bounds the frame's
+/// walk over the list, not its drawing; the count above the list is always the whole count.
+const LISTED_MAX: usize = 20_000;
+
+/// The height given to a result row that has not been drawn yet.
+const ROW_ESTIMATE: f32 = 44.0;
+
 /// Draw the Search panel with its query, options, progress and clickable result excerpts.
 pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, view: &mut DocView, pages: usize) {
     crate::widgets::begin_dialog(ui);
@@ -61,11 +68,26 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, view: &mut DocView, pages: us
     ui.add_space(4.0);
     let mut go = None;
     let mut last_page = None;
-    for (i, (p, range)) in find.matches.iter().enumerate().take(2000) {
+    let total = find.matches.len();
+    // The heights of rows drawn so far, so rows out of view can be skipped (see `Find::row_heights`).
+    let width = ui.available_width();
+    let mut heights = view.find.as_mut().map(|f| std::mem::take(&mut f.row_heights)).unwrap_or_default();
+    let width_before = view.find.as_ref().map_or(width, |f| f.row_width);
+    if (width_before - width).abs() > 1.0 {
+        heights.clear();
+    }
+    let Some(find) = view.find.as_ref() else { return };
+    for (i, (p, range)) in find.matches.iter().enumerate().take(LISTED_MAX) {
         if last_page != Some(*p) {
             ui.add_space(4.0);
             ui.label(egui::RichText::new(crate::i18n::fmt(tl!("Page {label}"), &[("label", &(p + 1).to_string())])).small().color(t.text_faint));
             last_page = Some(*p);
+        }
+        let known = heights.get(i).copied().filter(|h| *h > 0.0);
+        let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(width, known.unwrap_or(ROW_ESTIMATE)));
+        if !ui.is_rect_visible(row) {
+            ui.allocate_space(row.size());
+            continue;
         }
         let Some(text) = view.texts.get(p) else { continue };
         let n = text.glyphs.len();
@@ -91,9 +113,23 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, view: &mut DocView, pages: us
         job.wrap.max_width = ui.available_width();
         let selected = find.current == Some(i);
         let resp = ui.add(egui::Button::selectable(selected, job).wrap()).on_hover_text(tl!("Go to this result"));
+        if heights.len() <= i {
+            heights.resize(i + 1, 0.0);
+        }
+        if let Some(h) = heights.get_mut(i) {
+            *h = resp.rect.height();
+        }
         if resp.clicked() {
             go = Some(i);
         }
+    }
+    if total > LISTED_MAX {
+        let listed = LISTED_MAX.to_string();
+        ui.label(egui::RichText::new(crate::i18n::fmt(tl!("Only the first {n} results are listed"), &[("n", &listed)])).small().color(t.text_faint));
+    }
+    if let Some(f) = view.find.as_mut() {
+        f.row_heights = heights;
+        f.row_width = width;
     }
     if let Some(i) = go {
         view.go_to_match(i);

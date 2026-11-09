@@ -1,7 +1,6 @@
 use super::tools::row_label;
 use super::{
-    Align2, Availability, Color32, CornerRadius, LeftPanel, PdfCraftApp, Rect, Sense, Stroke, Tokens, ToolGroup, ToolItem, catalog, icons, theme,
-    vec2, widgets,
+    Align2, Availability, Color32, CornerRadius, PdfCraftApp, Rect, Sense, Stroke, Tokens, ToolGroup, ToolItem, catalog, icons, theme, vec2, widgets,
 };
 
 /// The page operations Edit shows as a row of icon buttons, as Acrobat's Edit panel does.
@@ -12,6 +11,13 @@ const EDIT_CONTENT_SHOWN: usize = 5;
 
 /// Other options: the tools Acrobat's Edit panel links to.
 const EDIT_OTHER_TOOLS: [&str; 3] = ["combine", "redact", "form"];
+
+/// The groups of Other options. The web build has no All tools list to reach the groups its
+/// Tools pane lists, so Other options links to each of them (Organize pages has its own row above,
+/// and Edit is this panel); `web` is the web build.
+fn other_tools(web: bool) -> Vec<&'static str> {
+    if web { catalog::TOOL_GROUPS.iter().map(|g| g.id).filter(|id| !matches!(*id, "edit" | "organize")).collect() } else { EDIT_OTHER_TOOLS.to_vec() }
+}
 
 /// Edit a PDF, laid out as Acrobat's Edit panel: the title with Preferences and Close; Format text
 /// while text is being edited or added; Modify page as a row of icon buttons and Organize pages;
@@ -27,7 +33,7 @@ pub(super) fn edit_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g
     let from_all_tools = app.mode != crate::Mode::Edit;
     ui.horizontal(|ui| {
         if from_all_tools && icons::button(ui, "chevron-left", 26.0, false, tl!("Back to all tools")).clicked() {
-            app.left = LeftPanel::AllTools;
+            app.left = super::tools_home();
             app.enter_mode(crate::Mode::AllTools);
         }
         // "Edit" under the Edit tab, as Acrobat titles it; the tool's own name from All tools.
@@ -56,10 +62,12 @@ pub(super) fn edit_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g
     format_section(app, ui, t);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         super::tools::clear_of_scrollbar(ui);
-        widgets::section_title(ui, tl!("Modify page"));
+        if EDIT_PAGE_BUTTONS.iter().chain(&["page.organize"]).any(|c| crate::commands::offered(c)) {
+            widgets::section_title(ui, tl!("Modify page"));
+        }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            for i in EDIT_PAGE_BUTTONS.iter().filter_map(|c| item(c)) {
+            for i in EDIT_PAGE_BUTTONS.iter().filter(|c| crate::commands::offered(c)).filter_map(|c| item(c)) {
                 // Enabled as the command itself is: a document that forbids page assembly refuses these.
                 let enabled = pdfcraft_engine::commands::command(i.command).is_some_and(|spec| app.command_enabled(spec));
                 let resp = ui.add_enabled_ui(enabled, |ui| icons::button(ui, i.icon, 34.0, false, tl!(i.label))).inner;
@@ -71,6 +79,7 @@ pub(super) fn edit_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g
         ui.add_space(2.0);
         // Organize pages is a workspace of its own: its panel replaces this one, with the grid.
         if let Some(i) = item("page.organize")
+            && crate::commands::offered("page.organize")
             && edit_row(ui, t, i.icon, tl!(i.label), i.availability).clicked()
         {
             // With no document there is no grid to open: the command asks for a file first.
@@ -81,9 +90,16 @@ pub(super) fn edit_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g
             }
         }
 
-        widgets::section_title(ui, tl!("Add content"));
-        let content: Vec<_> =
-            g.sections.iter().filter(|s| s.title == "Add content").flat_map(|s| s.items.iter()).filter(|i| i.command != "edit.edit_text").collect();
+        let content: Vec<_> = g
+            .sections
+            .iter()
+            .filter(|s| s.title == "Add content")
+            .flat_map(|s| s.items.iter())
+            .filter(|i| i.command != "edit.edit_text" && crate::commands::offered(i.command))
+            .collect();
+        if !content.is_empty() {
+            widgets::section_title(ui, tl!("Add content"));
+        }
         let more_id = egui::Id::unique("edit_panel_more");
         let more = ui.data(|d| d.get_temp::<bool>(more_id)).unwrap_or(false);
         let shown = if more { content.len() } else { EDIT_CONTENT_SHOWN.min(content.len()) };
@@ -113,8 +129,12 @@ pub(super) fn edit_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g
             }
         }
 
-        widgets::section_title(ui, tl!("Other options"));
-        for other in EDIT_OTHER_TOOLS.iter().filter_map(|id| catalog::group(id)) {
+        let others: Vec<&ToolGroup> =
+            other_tools(cfg!(target_arch = "wasm32")).iter().filter(|id| super::tool_listed(id)).filter_map(|id| catalog::group(id)).collect();
+        if !others.is_empty() {
+            widgets::section_title(ui, tl!("Other options"));
+        }
+        for other in others {
             if edit_row(ui, t, other.icon, tl!(other.label), other.availability).clicked() {
                 tool = Some(other.id);
             }
@@ -147,7 +167,7 @@ pub(super) fn actions_menu(
     egui::Popup::menu(resp).show(|ui| {
         ui.set_min_width(180.0);
         for (n, id) in item.actions.iter().enumerate() {
-            let Some(spec) = pdfcraft_engine::commands::command(id) else { continue };
+            let Some(spec) = pdfcraft_engine::commands::command(id).filter(|spec| crate::commands::offered(spec.id)) else { continue };
             // Add stays usable with no document open: it asks for a file first.
             let enabled = (n == 0 && app.active.is_none()) || app.command_enabled(spec);
             let label = crate::i18n::menu_label(spec.id, spec.label);

@@ -568,3 +568,141 @@ fn cutting_a_subtree_too_deep_to_copy_keeps_it() {
     assert!(toast.contains("so nothing was cut"), "{toast}");
     assert!(h.state().bookmark_clipboard.is_some(), "the copy is still on the bookmark clipboard");
 }
+
+/// Press the pointer twice a frame apart on `at` (an accessibility click is never a double-click).
+fn double_click_at(h: &mut Harness<'static, PdfCraftApp>, at: egui::Pos2) {
+    h.hover_at(at);
+    h.run_steps(1);
+    for _ in 0..2 {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.run_steps(1);
+    }
+    h.run_steps(3);
+}
+
+/// Every start of a rename selects the whole title, so typing replaces it: after an add, from the
+/// row's menu, and by double-click.
+#[test]
+fn every_rename_start_selects_the_whole_title() {
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 60.0).build_eframe(|_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("pages.pdf", None, PAGES.to_vec()).expect("opens");
+        app.set_option("left", "closed").unwrap();
+        app.set_option("panel", "bookmarks").unwrap();
+        app
+    });
+    h.run_steps(6);
+    // After an add (Ctrl+B): typed without selecting first.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::B);
+    h.run_steps(3);
+    field(&h, "Untitled").type_text("First");
+    h.run_steps(1);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(outline(&h)[0].0, "First");
+    // From the row's menu.
+    menu(&mut h, "First", "Rename");
+    field(&h, "First").type_text("Second");
+    h.run_steps(1);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(outline(&h)[0].0, "Second");
+    // By double-click: the row sets `bookmark_rename` as `BmAction::StartRename` does, which is set directly here (the
+    // pointer gesture itself is not reproduced reliably by the harness's frame stepping).
+    h.state_mut().bookmark_rename = Some((vec![0], "Second".into()));
+    h.run_steps(3);
+    field(&h, "Second").type_text("Third");
+    h.run_steps(1);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(outline(&h)[0].0, "Third");
+}
+
+/// The confirmed title is trimmed; an empty (or blank) title leaves the old one.
+#[test]
+fn a_renamed_title_is_trimmed_and_an_empty_one_keeps_the_old() {
+    let mut h = harness();
+    add(&mut h, "Keep");
+    menu(&mut h, "Keep", "Rename");
+    field(&h, "Keep").type_text("   Padded title  ");
+    h.run_steps(1);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(outline(&h)[0].0, "Padded title");
+    // Emptied.
+    menu(&mut h, "Padded title", "Rename");
+    h.key_press(Key::Backspace);
+    h.run_steps(1);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(outline(&h)[0].0, "Padded title");
+    // Blank.
+    menu(&mut h, "Padded title", "Rename");
+    field(&h, "Padded title").type_text("   ");
+    h.run_steps(1);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(outline(&h)[0].0, "Padded title");
+}
+
+/// The command, the panel's button and Ctrl+B make the same bookmark (title and destination).
+#[test]
+fn the_command_the_button_and_ctrl_b_add_the_same_bookmark() {
+    let mut h = harness();
+    assert!(h.state_mut().execute("bookmark.add"));
+    h.run_steps(3);
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    h.get_by_label_contains("New bookmark").click();
+    h.run_steps(3);
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::B);
+    h.run_steps(3);
+    let id = h.state().views[0].id;
+    let doc = h.state().session.get(id).unwrap();
+    let marks: Vec<_> = doc.info.outline.iter().map(|b| (b.title.clone(), b.page, format!("{:?}", b.view))).collect();
+    assert_eq!(marks.len(), 3, "{marks:?}");
+    assert!(marks.iter().all(|m| *m == marks[0]), "{marks:?}");
+    assert_eq!(marks[0].0, "Untitled");
+}
+
+/// A document that withholds page assembly (an outlined PDF protected in the test) offers no
+/// rename, no add and no panel button.
+#[test]
+fn bookmarks_cannot_be_renamed_or_added_without_the_assembly_permission() {
+    let mut source = PdfCraftApp::new();
+    source.open_bytes("pages.pdf", None, PAGES.to_vec()).expect("opens");
+    let add = pdfcraft_engine::Edit::AddBookmark { parent: vec![], index: 0, title: "Intro".into(), page: 0, left: None, top: None };
+    assert!(source.apply_edit(add));
+    assert!(source.apply_edit(pdfcraft_engine::Edit::Protect(pdfcraft_engine::Protection {
+        permissions_password: Some("owner".into()),
+        changes: pdfcraft_engine::Changes::None,
+        ..Default::default()
+    })));
+    let bytes = source.session.save_bytes(source.views[0].id).unwrap().as_ref().clone();
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("restricted.pdf", None, bytes).expect("opens");
+        app.set_option("left", "closed").unwrap();
+        app.set_option("panel", "bookmarks").unwrap();
+        app
+    });
+    h.run_steps(6);
+    h.get_by_label("Intro");
+    assert!(h.query_by_label_contains("New bookmark").is_none(), "no panel button");
+    h.get_by_label("Intro").click_secondary();
+    h.run_steps(2);
+    assert!(h.query_by_label("Rename").is_none(), "no row menu");
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    let at = h.get_by_label("Intro").rect().center();
+    double_click_at(&mut h, at);
+    assert!(h.state().bookmark_rename.is_none(), "no rename by double-click");
+    assert!(!h.state_mut().execute("bookmark.add"), "the command is refused");
+    let doc = h.state().session.get(h.state().views[0].id).unwrap();
+    assert_eq!(doc.info.outline.len(), 1);
+}

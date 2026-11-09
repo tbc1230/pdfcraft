@@ -145,3 +145,40 @@ fn the_link_context_menu_shows_only_for_a_right_click_on_a_link() {
     assert!(links(&h).is_empty());
     assert_eq!(h.state().session.get(h.state().views[0].id).unwrap().can_undo(), Some("Remove all links"));
 }
+
+/// Following a link inside the document goes to its page and changes nothing in the document.
+#[test]
+fn following_an_internal_link_changes_nothing_in_the_document() {
+    let pdf = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 /MediaBox [0 0 300 400] >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /Annots [6 0 R] >> endobj
+4 0 obj << /Type /Page /Parent 2 0 R >> endobj
+5 0 obj << /Type /Page /Parent 2 0 R >> endobj
+6 0 obj << /Type /Annot /Subtype /Link /Rect [20 340 120 380] /Border [0 0 0] /Dest [5 0 R /XYZ 50 100 2] >> endobj
+trailer << /Root 1 0 R >>
+%%EOF"
+        .to_vec();
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("links.pdf", None, pdf).unwrap();
+        app.set_option("zoom", "150").unwrap();
+        app
+    });
+    h.run_steps(6);
+    let state = |h: &Harness<'static, PdfCraftApp>| {
+        let doc = h.state().session.get(h.state().views[0].id).unwrap();
+        (doc.edit_generation(), doc.can_undo().is_some(), doc.dirty)
+    };
+    let before = state(&h);
+    let p = at(&h, 70.0, 40.0);
+    h.hover_at(p);
+    h.run_steps(2);
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(4);
+    assert_eq!(h.state().views[0].current, 2, "the link goes to page 3");
+    assert_eq!(h.state().views[0].zoom, 2.0, "the destination zoom is applied");
+    assert_eq!(state(&h), before, "following a link edits nothing");
+}

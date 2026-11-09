@@ -5,6 +5,10 @@
 
 #[cfg(any(target_arch = "wasm32", test))]
 mod api;
+#[cfg(target_arch = "wasm32")]
+mod host_api;
+#[cfg(any(target_arch = "wasm32", test))]
+mod host_settings;
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
@@ -50,6 +54,39 @@ fn main() {
                     // eframe never raises a close request on a browser reload or tab close, so `guard_quit` never
                     // prompts; ask the browser to confirm instead while a document has unsaved work (#812).
                     warn_before_unload(app.unsaved_flag.clone());
+                    // The setters are installed before `pdfcraft:ready` is posted below, so a page can call
+                    // them from its ready handler.
+                    // `window.pdfcraft.setAuthor(name)`: the host's name for the user, recorded on every markup
+                    // item and reply, not changeable in the editor.
+                    install_set_author(app.author_inbox.clone(), cc.egui_ctx.clone());
+                    // `window.pdfcraft.setLanguage(code)`: the host's interface language, in place of Preferences.
+                    install_set_language(app.language_inbox.clone(), cc.egui_ctx.clone());
+                    // `window.pdfcraft.setTheme("light" | "dark" | "system")`: the host's theme for the editor.
+                    install_set_theme(app.theme_inbox.clone(), cc.egui_ctx.clone());
+                    // `window.pdfcraft.save()`, `runCommand(id)`, `getState()` and the `pdfcraft:state` event:
+                    // always installed, with or without `?control` and hosted or not (`host_api`).
+                    app.host_state = Some(host_api::install(app.host_calls.clone(), cc.egui_ctx.clone()));
+                    // `data-language`, `data-theme` and `data-author` on the canvas: the same values, given
+                    // when the editor starts. They go through the same checks and inboxes as the setters;
+                    // a missing or invalid one changes nothing.
+                    if let Some(canvas) = app_canvas() {
+                        let attribute = |name: &str| canvas.get_attribute(name);
+                        if let Some(language) = attribute("data-language").as_deref().and_then(host_settings::language)
+                            && let Ok(mut slot) = app.language_inbox.lock()
+                        {
+                            *slot = Some(language);
+                        }
+                        if let Some(theme) = attribute("data-theme").as_deref().and_then(host_settings::theme)
+                            && let Ok(mut slot) = app.theme_inbox.lock()
+                        {
+                            *slot = Some(theme);
+                        }
+                        if let Some(author) = attribute("data-author").as_deref().and_then(host_settings::author)
+                            && let Ok(mut slot) = app.author_inbox.lock()
+                        {
+                            *slot = Some(author);
+                        }
+                    }
                     // Host modes (`host` below, over `craft-web-host`): `?host=parent`, a
                     // same-origin page embedding PdfCraft in an iframe (such as the Nextcloud
                     // app), or `data-host="page"` on the canvas, a host that runs the module in
@@ -87,6 +124,101 @@ fn main() {
             }
         }
     });
+}
+
+/// Put `setAuthor(name)` on `window.pdfcraft` (the object is made when the page has none; `api::install`
+/// keeps the functions it already has). A blank name is refused: the call returns false and nothing
+/// changes; otherwise it returns true and the app takes the name on its next frame
+/// (`PdfCraftApp::set_author`). No `#[wasm_bindgen]` export: the workspace forbids `unsafe_code`.
+#[cfg(target_arch = "wasm32")]
+fn install_set_author(inbox: pdfcraft_ui_egui::AuthorInbox, ctx: egui::Context) {
+    use eframe::wasm_bindgen::{JsCast, JsValue, closure::Closure};
+    let Some(window) = web_sys::window() else { return };
+    let key = JsValue::from_str("pdfcraft");
+    let api = match js_sys::Reflect::get(&window, &key) {
+        Ok(existing) if existing.is_object() => existing,
+        _ => {
+            let made: JsValue = js_sys::Object::new().into();
+            if js_sys::Reflect::set(&window, &key, &made).is_err() {
+                return;
+            }
+            made
+        }
+    };
+    let set_author = Closure::<dyn Fn(JsValue) -> bool>::new(move |name: JsValue| {
+        let Some(name) = name.as_string().as_deref().and_then(host_settings::author) else { return false };
+        let Ok(mut slot) = inbox.lock() else { return false };
+        *slot = Some(name);
+        ctx.request_repaint();
+        true
+    });
+    if js_sys::Reflect::set(&api, &JsValue::from_str("setAuthor"), set_author.as_ref().unchecked_ref()).is_ok() {
+        set_author.forget();
+    }
+}
+
+/// Put `setLanguage(code)` on `window.pdfcraft`, as `install_set_author` does `setAuthor`. The code is
+/// a language PdfCraft has a translation for (any case, such as `de` or `pt-br`) or `auto` for the
+/// browser's language; the call returns true when it is accepted and false for an unknown code, which
+/// changes nothing. The app takes it on its next frame (`PdfCraftApp::language_inbox`), shows every
+/// text in it where a translation exists, and keeps it as its `language` setting.
+#[cfg(target_arch = "wasm32")]
+fn install_set_language(inbox: pdfcraft_ui_egui::LanguageInbox, ctx: egui::Context) {
+    use eframe::wasm_bindgen::{JsCast, JsValue, closure::Closure};
+    let Some(window) = web_sys::window() else { return };
+    let key = JsValue::from_str("pdfcraft");
+    let api = match js_sys::Reflect::get(&window, &key) {
+        Ok(existing) if existing.is_object() => existing,
+        _ => {
+            let made: JsValue = js_sys::Object::new().into();
+            if js_sys::Reflect::set(&window, &key, &made).is_err() {
+                return;
+            }
+            made
+        }
+    };
+    let set_language = Closure::<dyn Fn(JsValue) -> bool>::new(move |code: JsValue| {
+        let Some(code) = code.as_string().as_deref().and_then(host_settings::language) else { return false };
+        let Ok(mut slot) = inbox.lock() else { return false };
+        *slot = Some(code);
+        ctx.request_repaint();
+        true
+    });
+    if js_sys::Reflect::set(&api, &JsValue::from_str("setLanguage"), set_language.as_ref().unchecked_ref()).is_ok() {
+        set_language.forget();
+    }
+}
+
+/// Put `setTheme(theme)` on `window.pdfcraft` (the object is made when the page has none; `api::install`
+/// keeps the functions it already has). `theme` is "light", "dark" or "system" (follow the browser's
+/// setting). Any other value is refused: the call returns false and nothing changes; otherwise it
+/// returns true and the app applies the theme on its next frame. No `#[wasm_bindgen]` export: the
+/// workspace forbids `unsafe_code`.
+#[cfg(target_arch = "wasm32")]
+fn install_set_theme(inbox: pdfcraft_ui_egui::ThemeInbox, ctx: egui::Context) {
+    use eframe::wasm_bindgen::{JsCast, JsValue, closure::Closure};
+    let Some(window) = web_sys::window() else { return };
+    let key = JsValue::from_str("pdfcraft");
+    let api = match js_sys::Reflect::get(&window, &key) {
+        Ok(existing) if existing.is_object() => existing,
+        _ => {
+            let made: JsValue = js_sys::Object::new().into();
+            if js_sys::Reflect::set(&window, &key, &made).is_err() {
+                return;
+            }
+            made
+        }
+    };
+    let set_theme = Closure::<dyn Fn(JsValue) -> bool>::new(move |theme: JsValue| {
+        let Some(preference) = theme.as_string().as_deref().and_then(host_settings::theme) else { return false };
+        let Ok(mut slot) = inbox.lock() else { return false };
+        *slot = Some(preference);
+        ctx.request_repaint();
+        true
+    });
+    if js_sys::Reflect::set(&api, &JsValue::from_str("setTheme"), set_theme.as_ref().unchecked_ref()).is_ok() {
+        set_theme.forget();
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

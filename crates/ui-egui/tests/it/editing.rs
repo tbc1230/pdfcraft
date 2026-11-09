@@ -9894,3 +9894,127 @@ fn affine_review_cropped_rotation_preview_matches_saved_corners() {
         );
     }
 }
+
+/// Delete pages follows one rule on every surface: refused when the selection holds every page,
+/// and for the current page of a one-page document, with the reason that one page must remain.
+#[test]
+fn delete_is_refused_when_no_page_would_remain() {
+    let mut h = organize(3);
+    h.state_mut().views[0].select_pages(&[0, 1, 2]);
+    h.run_steps(2);
+    assert!(h.get_by_label("Delete pages (Delete)").accesskit_node().is_disabled(), "the Organize pages panel");
+    let (before, pages) = {
+        let doc = h.state().session.get(h.state().views[0].id).unwrap();
+        (doc.edit_generation(), doc.info.pages.len())
+    };
+    assert!(!h.state_mut().execute("page.delete"), "the command");
+    let reason = h.state().toast.as_ref().map(|t| t.0.to_lowercase()).unwrap_or_default();
+    assert!(reason.contains("at least one page must remain"), "{reason}");
+    {
+        let doc = h.state().session.get(h.state().views[0].id).unwrap();
+        assert_eq!((doc.edit_generation(), doc.info.pages.len()), (before, pages), "nothing changed");
+    }
+    // Two of three pages: allowed.
+    h.state_mut().views[0].select_pages(&[0, 2]);
+    h.run_steps(2);
+    assert!(!h.get_by_label("Delete pages (Delete)").accesskit_node().is_disabled());
+    // A one-page document with no selection.
+    let mut one = organize(1);
+    one.run_steps(2);
+    assert!(one.get_by_label("Delete pages (Delete)").accesskit_node().is_disabled());
+    assert!(!one.state_mut().execute("page.delete"));
+    assert_eq!(one.state().session.get(one.state().views[0].id).unwrap().info.pages.len(), 1);
+}
+
+/// A selection of pages 2 and 4 is deleted in one undo step, and pages picked stay selected when
+/// the Pages panel is closed.
+#[test]
+fn a_selection_is_deleted_in_one_undo_step_and_survives_closing_the_panel() {
+    let mut h = harness(5, |app| app.set_option("panel", "pages").unwrap());
+    h.state_mut().views[0].select_pages(&[1, 3]);
+    h.run_steps(2);
+    h.state_mut().set_option("panel", "none").unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().views[0].target_pages(), [1, 3], "still selected after the panel closed");
+    assert!(h.state_mut().execute("page.delete"));
+    h.run_steps(2);
+    assert_eq!(page_texts(h.state()), ["Page 1", "Page 3", "Page 5"]);
+    h.state_mut().undo();
+    h.run_steps(2);
+    assert_eq!(page_texts(h.state()), ["Page 1", "Page 2", "Page 3", "Page 4", "Page 5"], "one undo brings both back");
+}
+
+/// A document of three pages of different sizes (200x300, 400x300, 300x300).
+fn sized_pages() -> Vec<u8> {
+    b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] >> endobj
+4 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] >> endobj
+5 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] >> endobj
+trailer << /Root 1 0 R >>
+%%EOF"
+        .to_vec()
+}
+
+fn page_sizes(app: &PdfCraftApp) -> Vec<(f32, f32)> {
+    app.session.get(app.views[app.active.unwrap()].id).unwrap().info.pages.iter().map(|p| (p.width, p.height)).collect()
+}
+
+/// A blank page goes after the last selected page, or the current page when none is selected, and
+/// has that page's size.
+#[test]
+fn a_blank_page_follows_the_last_selected_or_current_page_with_its_size() {
+    let sized = || {
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_cc| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", "en").unwrap();
+            app.open_bytes("sized.pdf", None, sized_pages()).unwrap();
+            app
+        });
+        h.run_steps(4);
+        h
+    };
+    // Page 2 current, nothing selected: after page 2, 400x300.
+    let mut h = sized();
+    h.state_mut().set_option("page", "2").unwrap();
+    h.run_steps(2);
+    assert!(h.state_mut().execute("page.insert_blank"));
+    assert_eq!(page_sizes(h.state()), [(200.0, 300.0), (400.0, 300.0), (400.0, 300.0), (300.0, 300.0)]);
+    // Pages 1 and 2 selected: after the last selected one, page 2.
+    let mut h = sized();
+    h.state_mut().views[0].select_pages(&[0, 1]);
+    assert!(h.state_mut().execute("page.insert_blank"));
+    assert_eq!(page_sizes(h.state()), [(200.0, 300.0), (400.0, 300.0), (400.0, 300.0), (300.0, 300.0)]);
+    // Page 1 selected while page 2 is current: after page 1, 200x300.
+    let mut h = sized();
+    h.state_mut().set_option("page", "2").unwrap();
+    h.state_mut().views[0].select_pages(&[0]);
+    assert!(h.state_mut().execute("page.insert_blank"));
+    assert_eq!(page_sizes(h.state()), [(200.0, 300.0), (200.0, 300.0), (400.0, 300.0), (300.0, 300.0)]);
+    h.state_mut().undo();
+    assert_eq!(page_sizes(h.state()).len(), 3, "one undo takes the blank page out");
+}
+
+/// Without the assembly permission, inserting a blank page and deleting pages are refused with the
+/// reason, and nothing changes.
+#[test]
+fn page_changes_are_refused_without_the_assembly_permission() {
+    let mut h = harness(3, |app| {
+        app.apply_edit(pdfcraft_engine::Edit::Protect(pdfcraft_engine::Protection {
+            permissions_password: Some("owner".into()),
+            changes: pdfcraft_engine::Changes::None,
+            ..Default::default()
+        }));
+        let bytes = app.session.save_bytes(app.views[0].id).unwrap();
+        app.open_bytes("restricted.pdf", None, bytes.as_ref().clone()).unwrap();
+    });
+    let tab = h.state().active.unwrap();
+    for command in ["page.insert_blank", "page.delete"] {
+        h.state_mut().views[tab].select_pages(&[1]);
+        h.state_mut().toast = None;
+        assert!(!h.state_mut().execute(command), "{command}");
+        assert_eq!(h.state().toast.as_ref().map(|t| t.0.as_str()), Some("The document's security settings don't allow this change"));
+    }
+    assert_eq!(page_sizes(h.state()).len(), 3);
+}

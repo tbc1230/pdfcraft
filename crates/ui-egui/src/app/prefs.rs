@@ -263,8 +263,9 @@ impl PdfCraftApp {
         if let Ok(effects) = serde_json::from_value::<motion::AnimationEffects>(v["animation_effects"].clone()) {
             self.animation_effects = effects;
         }
+        // The web build opens in Edit whatever was saved: it has no Preferences to choose another.
         if let Ok(mode) = serde_json::from_value::<Mode>(v["default_mode"].clone()) {
-            self.default_mode = mode;
+            self.default_mode = crate::panels::default_mode_in(cfg!(target_arch = "wasm32"), mode);
         }
         if let Some((layout, continuous)) = v["default_layout"].as_str().and_then(canvas::parse_display_token) {
             (self.view_defaults.layout, self.view_defaults.continuous) = (layout, continuous);
@@ -365,7 +366,10 @@ impl PdfCraftApp {
         }
         // An empty or missing name keeps the login-name default; settings are untrusted, so the
         // name is cut to a sane length.
-        if let Some(author) = v["author"].as_str().map(str::trim).filter(|a| !a.is_empty()) {
+        // A name the host set stays: it is not the user's to change.
+        if !self.author_locked
+            && let Some(author) = v["author"].as_str().map(str::trim).filter(|a| !a.is_empty())
+        {
             self.comment_prefs.author = author.chars().take(MAX_AUTHOR_CHARS).collect();
         }
         if let Some(hide) = v["hide_empty_highlight_hover"].as_bool() {
@@ -374,6 +378,20 @@ impl PdfCraftApp {
         if let Some(pinned) = v["comment_tool_pinned"].as_bool() {
             self.comment_prefs.pinned = pinned;
         }
+    }
+
+    /// Set the author name that new markup items and replies record, and lock it: Preferences and
+    /// the comment properties show it but do not change it, and restored settings and the control
+    /// channel leave it alone. The name is trimmed and cut to [`MAX_AUTHOR_CHARS`]; a blank name is
+    /// refused (returns false) and changes nothing.
+    pub fn set_author(&mut self, name: &str) -> bool {
+        let name: String = name.trim().chars().take(MAX_AUTHOR_CHARS).collect();
+        if name.is_empty() {
+            return false;
+        }
+        self.comment_prefs.author = name;
+        self.author_locked = true;
+        true
     }
 
     /// The author and per-tool comment styles.
@@ -454,5 +472,25 @@ impl PdfCraftApp {
             let certs = pems.iter().filter_map(|p| pdfcraft_engine::sign::x509::load_certificates(p.as_bytes()).ok()).flatten().collect();
             self.apply_trusted_certificates(certs);
         }
+    }
+}
+
+#[cfg(test)]
+mod author_tests {
+    use crate::PdfCraftApp;
+
+    #[test]
+    fn set_author_records_and_locks_the_name() {
+        let mut app = PdfCraftApp::new();
+        assert!(!app.set_author("   "), "a blank name is refused");
+        assert!(!app.author_locked);
+        assert!(app.set_author("  Ada Lovelace "));
+        assert_eq!(app.comment_prefs.author, "Ada Lovelace");
+        assert!(app.author_locked);
+        assert!(app.set_option("author", "Mallory").is_err(), "the control channel cannot change a host-set name");
+        app.restore(r#"{"author":"Saved Name"}"#);
+        assert_eq!(app.comment_prefs.author, "Ada Lovelace", "restored settings leave it alone");
+        assert!(app.set_author(&"x".repeat(500)));
+        assert_eq!(app.comment_prefs.author.chars().count(), super::MAX_AUTHOR_CHARS);
     }
 }

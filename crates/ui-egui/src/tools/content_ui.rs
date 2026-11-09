@@ -908,11 +908,13 @@ impl crate::PdfCraftApp {
     }
 
     /// Edit a PDF ▸ Add content ▸ Image: pick a file and place it in the middle of the current page.
+    /// On the web the file chooser opens and the chosen image follows the pointer until a click on
+    /// a page places it (`start_image_placement`).
     pub fn add_image_dialog(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         self.pick_image(tl!("Choose an image"), |app, name, bytes| app.add_image(name, bytes));
         #[cfg(target_arch = "wasm32")]
-        self.notify_tr("Adding images arrives on the web with file pickers for images");
+        self.pick_image_to_place();
     }
 
     /// Edit text & images ▸ Replace Image: pick a file to draw in a page image's place.
@@ -1060,11 +1062,18 @@ impl crate::PdfCraftApp {
 
     /// Place image `bytes` in the middle of the current page and select it.
     pub fn add_image(&mut self, name: String, bytes: Vec<u8>) {
-        let Some((i, id)) = self.active_ids() else { return };
+        let Some((i, _)) = self.active_ids() else { return };
         let page = self.views[i].current;
+        self.add_image_at(page, None, name, std::sync::Arc::new(bytes));
+    }
+
+    /// Add an image to `page`, in the box `rect` (user space) or by default in the middle of the
+    /// page, and select it in the Edit tool.
+    pub(crate) fn add_image_at(&mut self, page: usize, rect: Option<[f64; 4]>, name: String, bytes: std::sync::Arc<Vec<u8>>) {
+        let Some((i, id)) = self.active_ids() else { return };
         let before_img = self.session.get(id).map_or(0, |d| d.page_images(page).len());
         let before_added = self.session.get(id).map_or(0, |d| d.added().iter().filter(|a| a.page == page).count());
-        if self.apply_edit(Edit::AddImage { page, rect: None, name, bytes: std::sync::Arc::new(bytes) }) {
+        if self.apply_edit(Edit::AddImage { page, rect, name, bytes }) {
             self.views[i].content.selected = Some((page, before_added));
             self.views[i].content.select_added = Some((page, before_added));
             self.views[i].image_selection = Some(crate::edit_text_ui::ImageSelection::at(page, before_img));

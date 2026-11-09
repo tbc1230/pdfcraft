@@ -28,7 +28,7 @@ pub(crate) fn workspace_panel(mode: crate::Mode) -> LeftPanel {
         crate::Mode::Edit => LeftPanel::Tool("edit"),
         crate::Mode::Convert => LeftPanel::Tool("export"),
         crate::Mode::Sign => LeftPanel::Tool("fill_sign"),
-        _ => LeftPanel::AllTools,
+        _ => super::tools_home(),
     }
 }
 
@@ -46,6 +46,9 @@ pub(crate) fn panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
     let editable = doc.allows_assembly();
     let n = info.pages.len();
     let mut act: Option<Act> = None;
+    // Every row that runs a registry command is drawn only where the build offers it (the web
+    // build: fork change "interface-parts-hidden").
+    let offered = crate::commands::offered;
     let mut back = false;
     let mut close = false;
     let Some(view) = app.views.get_mut(index) else { return };
@@ -100,45 +103,53 @@ pub(crate) fn panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
         ui.add_enabled_ui(editable, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                if icons::button(ui, "rotate-ccw", 34.0, false, tl!("Rotate counterclockwise")).clicked() {
+                if offered("page.rotate_ccw") && icons::button(ui, "rotate-ccw", 34.0, false, tl!("Rotate counterclockwise")).clicked() {
                     act = Some(Act::Edit(Box::new(Edit::RotatePages { pages: targets.clone(), degrees: -90 })));
                 }
-                if icons::button(ui, "rotate-cw", 34.0, false, tl!("Rotate clockwise")).clicked() {
+                if offered("page.rotate") && icons::button(ui, "rotate-cw", 34.0, false, tl!("Rotate clockwise")).clicked() {
                     act = Some(Act::Edit(Box::new(Edit::RotatePages { pages: targets.clone(), degrees: 90 })));
                 }
-                // A document keeps at least one page.
-                let can_delete = targets.len() < n;
-                if ui.add_enabled_ui(can_delete, |ui| icons::button(ui, "trash-2", 34.0, false, tl!("Delete pages (Delete)"))).inner.clicked() {
+                // The one delete rule (`DocView::pages_deletable`): a document keeps at least one page.
+                let can_delete = crate::DocView::pages_deletable(editable, &targets, n);
+                if offered("page.delete")
+                    && ui.add_enabled_ui(can_delete, |ui| icons::button(ui, "trash-2", 34.0, false, tl!("Delete pages (Delete)"))).inner.clicked()
+                {
                     act = Some(Act::Edit(Box::new(Edit::DeletePages { pages: targets.clone() })));
                 }
-                if icons::button(ui, "file-output", 34.0, false, tl!("Extract pages to a new document")).clicked() {
+                if offered("page.extract") && icons::button(ui, "file-output", 34.0, false, tl!("Extract pages to a new document")).clicked() {
                     act = Some(Act::View(ViewAction::Extract));
                 }
             });
             ui.add_space(2.0);
             // Insert ▸: a blank page, pages from a file, or copies of the selected pages.
-            let insert = row(ui, t, "file-plus-2", tl!("Insert"), Availability::Ready, true);
-            egui::Popup::menu(&insert).align(egui::RectAlign::RIGHT_START).gap(6.0).show(|ui| {
-                if ui.button(tl!("Insert a blank page after the selection")).clicked() {
-                    let crop = info.pages.get(last).map_or([0.0, 0.0, 612.0, 792.0], |p| p.crop);
-                    let (w, h) = ((crop[2] - crop[0]).abs().max(1.0) as f64, (crop[3] - crop[1]).abs().max(1.0) as f64);
-                    act = Some(Act::Edit(Box::new(Edit::InsertBlankPage { at: last.saturating_add(1), width: w, height: h })));
-                }
-                if ui.button(tl!("Insert pages from a file…")).clicked() {
-                    act = Some(Act::View(ViewAction::InsertFromFile));
-                }
-                if ui.button(tl!("Duplicate pages")).clicked() {
-                    act = Some(Act::Command("page.duplicate"));
-                }
-            });
-            if row(ui, t, "replace", tl!("Replace"), Availability::Ready, false).clicked() {
+            let insert = if offered("page.insert_blank") || offered("page.insert") || offered("page.duplicate") {
+                Some(row(ui, t, "file-plus-2", tl!("Insert"), Availability::Ready, true))
+            } else {
+                None
+            };
+            if let Some(insert) = insert {
+                egui::Popup::menu(&insert).align(egui::RectAlign::RIGHT_START).gap(6.0).show(|ui| {
+                    if offered("page.insert_blank") && ui.button(tl!("Insert a blank page after the selection")).clicked() {
+                        let crop = info.pages.get(last).map_or([0.0, 0.0, 612.0, 792.0], |p| p.crop);
+                        let (w, h) = ((crop[2] - crop[0]).abs().max(1.0) as f64, (crop[3] - crop[1]).abs().max(1.0) as f64);
+                        act = Some(Act::Edit(Box::new(Edit::InsertBlankPage { at: last.saturating_add(1), width: w, height: h })));
+                    }
+                    if offered("page.insert") && ui.button(tl!("Insert pages from a file…")).clicked() {
+                        act = Some(Act::View(ViewAction::InsertFromFile));
+                    }
+                    if offered("page.duplicate") && ui.button(tl!("Duplicate pages")).clicked() {
+                        act = Some(Act::Command("page.duplicate"));
+                    }
+                });
+            }
+            if offered("page.replace") && row(ui, t, "replace", tl!("Replace"), Availability::Ready, false).clicked() {
                 act = Some(Act::View(ViewAction::ReplacePages));
             }
-            if row(ui, t, "scissors", tl!("Split"), Availability::Ready, false).clicked() {
+            if offered("page.split") && row(ui, t, "scissors", tl!("Split"), Availability::Ready, false).clicked() {
                 act = Some(Act::View(ViewAction::Split));
             }
         });
-        if row(ui, t, "hash", tl!("Bates numbering"), Availability::Ready, false).clicked() {
+        if crate::commands::offered("edit.bates") && row(ui, t, "hash", tl!("Bates numbering"), Availability::Ready, false).clicked() {
             act = Some(Act::Command("edit.bates"));
         }
         divider(ui, t);
@@ -149,6 +160,11 @@ pub(crate) fn panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
             ("file-text", "Page templates", Availability::Later, None),
             ("printer", "Print pages", Availability::Ready, Some("print.dialog")),
         ] {
+            // A command the build does not offer has no row; rows without a command are kept. A
+            // planned row (it does nothing yet) is not drawn in the web build.
+            if command.is_some_and(|c| !crate::commands::offered(c)) || (cfg!(target_arch = "wasm32") && availability == Availability::Later) {
+                continue;
+            }
             if row(ui, t, icon, tl!(label), availability, false).clicked()
                 && let Some(command) = command
             {
@@ -156,10 +172,10 @@ pub(crate) fn panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
             }
         }
         divider(ui, t);
-        if row(ui, t, "tag", tl!("Page labels"), Availability::Ready, false).clicked() {
+        if crate::commands::offered("page.number") && row(ui, t, "tag", tl!("Page labels"), Availability::Ready, false).clicked() {
             act = Some(Act::Command("page.number"));
         }
-        if row(ui, t, "info", tl!("Page properties"), Availability::Ready, false).clicked() {
+        if crate::commands::offered("page.properties") && row(ui, t, "info", tl!("Page properties"), Availability::Ready, false).clicked() {
             act = Some(Act::Command("page.properties"));
         }
     });
@@ -169,12 +185,13 @@ pub(crate) fn panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
         app.left = workspace_panel(app.mode);
     } else if back {
         view.organize = false;
-        app.left = LeftPanel::AllTools;
+        app.left = super::tools_home();
     }
     match act {
         Some(Act::Edit(edit)) => view.pending_edit = Some(*edit),
         Some(Act::View(action)) => view.pending_action = Some(action),
-        Some(Act::Command(command)) => app.run_command(command),
+        Some(Act::Command(command)) if crate::commands::offered(command) => app.run_command(command),
+        Some(Act::Command(_)) => {}
         None => {}
     }
     // Leaving the workspace needs the whole app, so it waits until the view is done with: leaving

@@ -1044,7 +1044,7 @@ pub(crate) fn image_context_menu(
             let entry = crate::icons::button(ui, name, 24.0, false, tip);
             picked(ui, entry)
         };
-        if icon(ui, "message-square", tl!("Add a sticky note here")) {
+        if crate::commands::offered("comment.note") && icon(ui, "message-square", tl!("Add a sticky note here")) {
             *action = Some(ImageAction::AddComment(page, hit));
         }
         if raster
@@ -1108,19 +1108,21 @@ pub(crate) fn image_context_menu(
 
     ui.separator();
 
-    if item(ui, true, tl!("Draw freehand")) {
+    // An entry that runs a registry command is drawn only where the build offers it (the web
+    // build: fork change "interface-parts-hidden").
+    if crate::commands::offered("comment.ink") && item(ui, true, tl!("Draw freehand")) {
         *action = Some(ImageAction::DrawFreehand);
     }
-    if item(ui, true, tl!("Redact Image")) {
+    if crate::commands::offered("redact.mark") && item(ui, true, tl!("Redact Image")) {
         *action = Some(ImageAction::Redact(page, hit));
     }
 
     ui.separator();
 
-    if item(ui, true, tl!("Create Link…")) {
+    if crate::commands::offered("edit.link") && item(ui, true, tl!("Create Link…")) {
         *action = Some(ImageAction::Link(page, hit));
     }
-    if item(ui, true, tl!("Recognize Text…")) {
+    if crate::commands::offered("ocr.recognize") && item(ui, true, tl!("Recognize Text…")) {
         *action = Some(ImageAction::Recognize(page));
     }
 

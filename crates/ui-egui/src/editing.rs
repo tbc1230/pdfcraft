@@ -12,6 +12,7 @@ mod save;
 pub use close::CloseRequest;
 #[cfg(not(target_arch = "wasm32"))]
 pub use save::PendingOverwrite;
+pub(crate) use save::TakeBytes;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use save::download;
 #[cfg(not(target_arch = "wasm32"))]
@@ -133,8 +134,26 @@ fn form_edit_pages(
 impl PdfCraftApp {
     /// Apply an edit to the active document. Returns `true` on success; failures are shown.
     pub fn apply_edit(&mut self, edit: Edit) -> bool {
-        let Some((i, id)) = self.active_ids() else { return false };
+        if self.active_ids().is_none() {
+            return false;
+        }
         let label = edit.label();
+        let is_move = matches!(edit, Edit::MoveObjects { .. });
+        match self.apply_edit_quiet(edit) {
+            Ok(()) => true,
+            Err(e) => {
+                let message = if is_move { crate::object_ui::move_error(&e) } else { e.to_string() };
+                self.notify_fmt("{label} failed: {e}", &[("label", &crate::i18n::edit_label(&label)), ("e", &message)]);
+                false
+            }
+        }
+    }
+
+    /// [`Self::apply_edit`] without the toast for a failure: the failure is returned, with the
+    /// view left as a failed edit leaves it. For a caller that reports the error itself (the host
+    /// functions).
+    pub(crate) fn apply_edit_quiet(&mut self, edit: Edit) -> Result<(), pdfcraft_engine::EditError> {
+        let Some((i, id)) = self.active_ids() else { return Err(pdfcraft_engine::EditError::NoDocument) };
         let target_arrange_image = match &edit {
             Edit::EditPageImage { page, index, change: pdfcraft_engine::ImageEdit::Arrange(_) } => {
                 let doc = self.session.get(id);
@@ -170,7 +189,7 @@ impl PdfCraftApp {
         };
         match self.session.apply(id, edit.clone()) {
             Ok(()) => {
-                let Some(doc) = self.session.get(id) else { return true };
+                let Some(doc) = self.session.get(id) else { return Ok(()) };
                 let info = &doc.info;
                 let view = &mut self.views[i];
                 view.applied_editor = None;
@@ -230,7 +249,7 @@ impl PdfCraftApp {
                 }
                 let out = self.session.take_js_output(id);
                 self.handle_js(id, out);
-                true
+                Ok(())
             }
             Err(e) => {
                 if let Some(view) = self.views.get_mut(i) {
@@ -249,9 +268,7 @@ impl PdfCraftApp {
                         view.pending_text_open = None;
                     }
                 }
-                let message = if matches!(edit, Edit::MoveObjects { .. }) { crate::object_ui::move_error(&e) } else { e.to_string() };
-                self.notify_fmt("{label} failed: {e}", &[("label", &crate::i18n::edit_label(&label)), ("e", &message)]);
-                false
+                Err(e)
             }
         }
     }
@@ -476,7 +493,9 @@ impl PdfCraftApp {
             Some(crate::canvas::ViewAction::InsertFromFileAt(at)) => self.insert_from_file_at(Some(at)),
             Some(crate::canvas::ViewAction::ReplacePages) => self.replace_pages_dialog(),
             Some(crate::canvas::ViewAction::Save) => {
-                self.save_active(SaveTarget::InPlace);
+                if crate::commands::offered("file.save") {
+                    self.save_active(SaveTarget::InPlace);
+                }
             }
             Some(crate::canvas::ViewAction::Extract) => self.open_extract_dialog(),
             Some(crate::canvas::ViewAction::Split) => self.dialog = Some(crate::Dialog::Split),
@@ -649,6 +668,7 @@ impl PdfCraftApp {
             pages: Some(clip.pages.clone()),
             at,
             field_conflicts,
+            password: None,
         }) {
             self.views[i].select_pages(&(at..at + count).collect::<Vec<_>>());
         }
@@ -964,15 +984,7 @@ impl PdfCraftApp {
         let parent_of = |p: &[usize]| p[..p.len() - 1].to_vec();
         let edit = match action {
             A::New => {
-                let n = self.session.get(id).map_or(0, |d| d.info.outline.len());
-                // Where the reader is: the selection's corner, else the top of the window.
-                let (page, [left, top]) =
-                    self.session.get(id).and_then(|d| self.views.get(i)?.bookmark_position(&d.info)).unwrap_or((current, [None, None]));
-                let (left, top) = (left.map(f64::from), top.map(f64::from));
-                self.apply_edit(Edit::AddBookmark { parent: vec![], index: n, title: "Untitled".into(), page, left, top });
-                // Like Acrobat: the new bookmark starts in rename mode.
-                self.bookmark_rename = Some((vec![n], "Untitled".into()));
-                self.right = Some(crate::RightPanel::Bookmarks);
+                self.add_bookmark();
                 return;
             }
             A::StartRename(path) => {

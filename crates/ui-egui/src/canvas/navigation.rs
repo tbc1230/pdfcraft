@@ -1,7 +1,42 @@
 use super::zoom::GRID_ZOOM_STEP;
 use super::{DestView, DocInfo, DocView, Fit, PT, PageLayout, SIDE, ViewAction, pos2, vec2};
 
+/// The longest title New bookmark takes from selected text, in characters.
+pub(crate) const BOOKMARK_TITLE_MAX: usize = 128;
+
+/// `text` as a one-line bookmark title: every run of whitespace (a line break included) is one
+/// space, the ends are trimmed and at most [`BOOKMARK_TITLE_MAX`] characters are kept. Empty when
+/// `text` holds nothing but whitespace.
+pub(crate) fn one_line_title(text: &str) -> String {
+    let mut line = String::new();
+    // Stops at the first word that reaches the cap, so a huge selection is not walked to its end.
+    for word in text.split(|c: char| c.is_whitespace() || c.is_control()).filter(|w| !w.is_empty()) {
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+        if line.chars().count() >= BOOKMARK_TITLE_MAX {
+            break;
+        }
+    }
+    let kept: String = line.chars().take(BOOKMARK_TITLE_MAX).collect();
+    kept.trim_end().to_owned()
+}
+
 impl DocView {
+    /// The title New bookmark gives: the selected text on one line, at most
+    /// [`BOOKMARK_TITLE_MAX`] characters, or "Untitled" with no text selected. The selection is the
+    /// one [`Self::bookmark_position`] opens the page at.
+    pub(crate) fn bookmark_title(&self) -> String {
+        let selected = (!self.organize)
+            .then_some(self.selection)
+            .flatten()
+            .and_then(|sel| self.texts.get(&sel.page).map(|text| sel.text(text)))
+            .map(|text| one_line_title(&text))
+            .filter(|title| !title.is_empty());
+        selected.unwrap_or_else(|| "Untitled".to_owned())
+    }
+
     /// Where a bookmark made now should go: the page and the `/XYZ` position `[left, top]` in user
     /// space. With text selected it is the corner of the selection that shows at its top-left
     /// (its page, both coordinates); otherwise the top of the window (the page showing there, and
@@ -512,5 +547,31 @@ mod tests {
         for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
             assert_eq!(sliver(bad), 1.0, "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod bookmark_title_tests {
+    use super::{BOOKMARK_TITLE_MAX, one_line_title};
+
+    /// A selection across lines is one line: runs of whitespace and line breaks become one space.
+    #[test]
+    fn a_selection_becomes_one_trimmed_line() {
+        assert_eq!(one_line_title("  Chapter\n one \t of\r\ntwo  "), "Chapter one of two");
+        assert_eq!(one_line_title(" \n\t "), "");
+        assert_eq!(one_line_title("a\u{0}b"), "a b", "control characters separate words");
+    }
+
+    /// At most 128 characters (not bytes), cut on a character boundary and without a trailing space.
+    #[test]
+    fn the_title_keeps_at_most_128_characters() {
+        let long = "word ".repeat(100);
+        let title = one_line_title(&long);
+        assert!(title.chars().count() <= BOOKMARK_TITLE_MAX && !title.ends_with(' '), "{title:?}");
+        assert!(long.starts_with(&title));
+        let cjk = "\u{56f3}".repeat(500);
+        assert_eq!(one_line_title(&cjk).chars().count(), BOOKMARK_TITLE_MAX);
+        // One huge word is cut too.
+        assert_eq!(one_line_title(&"x".repeat(1_000_000)).chars().count(), BOOKMARK_TITLE_MAX);
     }
 }

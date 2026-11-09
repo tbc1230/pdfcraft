@@ -5,6 +5,10 @@ impl PdfCraftApp {
     pub fn run_command(&mut self, command: &str) {
         if let Some(spec) = pdfcraft_engine::commands::command(command) {
             use pdfcraft_engine::commands::Needs;
+            // A command the editor does not offer does nothing, not even ask for a file first.
+            if !crate::commands::offered(command) {
+                return;
+            }
             // A tool that needs a document, chosen with none open, asks for the file and then
             // runs on it, instead of only saying to open one first.
             let needs_document = !matches!(spec.needs, Needs::Nothing | Needs::Undo | Needs::Redo);
@@ -12,6 +16,11 @@ impl PdfCraftApp {
                 .iter()
                 .flat_map(|g| g.sections.iter().flat_map(|s| s.items.iter()))
                 .any(|i| i.command == spec.id);
+            // The web build shows no message with no document open (fork change
+            // "interface-parts-hidden"): a command that needs one does nothing.
+            if cfg!(target_arch = "wasm32") && self.active.is_none() && needs_document && !self.command_enabled(spec) {
+                return;
+            }
             if self.active.is_none() && needs_document && is_tool && !self.command_enabled(spec) {
                 self.open_then_run(spec);
                 return;
@@ -19,7 +28,11 @@ impl PdfCraftApp {
             self.execute(command);
             return;
         }
-        // Not implemented yet: say which milestone ships it.
+        // Not implemented yet: say which milestone ships it. The web build shows no such message:
+        // it lists no tool that is not a command yet.
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
         let when = pdfcraft_engine::catalog::TOOL_GROUPS
             .iter()
             .flat_map(|g| g.sections.iter().flat_map(|s| s.items.iter()))
@@ -46,11 +59,11 @@ impl PdfCraftApp {
         });
     }
 
-    /// Browsers read the picked file asynchronously; it opens, and the tool can be chosen again.
+    /// The web build never asks for a file: which document is open is the client's choice (fork
+    /// change "offered-commands"). With no document open it shows no message either: what is
+    /// opened, and every message about it, is Workspace's (fork change "interface-parts-hidden").
     #[cfg(target_arch = "wasm32")]
-    fn open_then_run(&mut self, _spec: &'static pdfcraft_engine::commands::CommandSpec) {
-        self.open_dialog();
-    }
+    fn open_then_run(&mut self, _spec: &'static pdfcraft_engine::commands::CommandSpec) {}
 
     pub(crate) fn reveal_tools(&mut self) {
         self.left_open = true;
@@ -59,8 +72,12 @@ impl PdfCraftApp {
     /// Enter a tool from the catalogue, Home, palette or control channel. Organize is a
     /// workspace, so opening its panel also opens the page grid (without toggling it off).
     pub(crate) fn select_tool(&mut self, id: &'static str) {
-        // The tool's panel shows, not the expanded All tools view over it.
+        // The tool's panel shows, not the expanded All tools view over it. A group the build does
+        // not list (the web build) is not opened from anywhere.
         self.all_tools_full = false;
+        if !crate::panels::tool_listed(id) {
+            return;
+        }
         self.left = LeftPanel::Tool(id);
         self.reveal_tools();
         if let Some(view) = self.active.and_then(|i| self.views.get_mut(i)) {
@@ -75,6 +92,8 @@ impl PdfCraftApp {
     /// Select the workspace and its matching tool panel, just like the mode bar. The tool goes
     /// with the workspace as [`Self::enter_mode`] sets it.
     pub(crate) fn select_mode(&mut self, mode: Mode) {
+        // The web build has no All tools, Convert or E-Sign workspace: it selects Edit instead.
+        let mode = crate::panels::offered_mode(mode);
         self.enter_mode(mode);
         self.reveal_tools();
         if let Some(view) = self.active.and_then(|i| self.views.get_mut(i)) {
@@ -84,7 +103,7 @@ impl PdfCraftApp {
             Mode::Edit => LeftPanel::Tool("edit"),
             Mode::Convert => LeftPanel::Tool("export"),
             Mode::Sign => LeftPanel::Tool("fill_sign"),
-            _ => LeftPanel::AllTools,
+            _ => crate::panels::tools_home(),
         };
     }
 
@@ -94,6 +113,17 @@ impl PdfCraftApp {
     /// every paragraph and image on the page gets its box and is editable with one click. Leaving
     /// Edit puts the editing tools down again and applies a paragraph still open in the editor.
     pub(crate) fn enter_mode(&mut self, mode: Mode) {
+        // A workspace the build does not have (All tools, Convert, E-Sign on the web) leaves the
+        // current one as it is, or, from Read, becomes Edit with the tool as it was: the web
+        // build is never in All tools (fork change "interface-parts-hidden").
+        let offered = crate::panels::offered_mode(mode);
+        if offered != mode {
+            if self.mode != Mode::Edit {
+                self.mode = offered;
+            }
+            self.all_tools_full = false;
+            return;
+        }
         self.mode = mode;
         // Another workspace puts the expanded All tools view away.
         if mode != Mode::AllTools {
@@ -114,6 +144,11 @@ impl PdfCraftApp {
     /// Fill the workspace with the expanded All tools view, entering All tools the way the mode
     /// bar does: leaving Read restores its right panel and leaving Edit puts the editing tool down.
     pub(crate) fn expand_all_tools(&mut self) {
+        // The web build has no expanded All tools view.
+        if cfg!(target_arch = "wasm32") {
+            self.all_tools_full = false;
+            return;
+        }
         if self.mode != Mode::AllTools {
             self.switch_mode(Mode::AllTools, true);
         }

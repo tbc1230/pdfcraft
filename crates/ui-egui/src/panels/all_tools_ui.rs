@@ -33,7 +33,9 @@ fn matches(query: &str, group: &ToolGroup) -> Option<Vec<&'static str>> {
         return Some(Vec::new());
     }
     let action_hit = |id: &&str| {
-        pdfcraft_engine::commands::command(id).is_some_and(|spec| label_hit(spec.label, &crate::i18n::menu_label(spec.id, spec.label), query, rtl))
+        pdfcraft_engine::commands::command(id)
+            .filter(|spec| crate::commands::offered(spec.id))
+            .is_some_and(|spec| label_hit(spec.label, &crate::i18n::menu_label(spec.id, spec.label), query, rtl))
     };
     let items: Vec<_> =
         group.sections.iter().flat_map(|s| s.items.iter()).filter(|i| hit(i.label) || i.actions.iter().any(action_hit)).map(|i| i.label).collect();
@@ -43,6 +45,12 @@ fn matches(query: &str, group: &ToolGroup) -> Option<Vec<&'static str>> {
 /// Draw the view over the workspace: the title with Collapse, the search field, and each
 /// category's tiles that match the search. Choosing a tile opens that tool's panel.
 pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
+    // The web build has no expanded All tools view: nothing opens it, and if it was asked for it
+    // closes at once and leaves the pasteboard empty (fork change "interface-parts-hidden").
+    if cfg!(target_arch = "wasm32") {
+        app.all_tools_full = false;
+        return;
+    }
     let t = Tokens::get(ui.ctx());
     // A dialog, prompt or the command palette over the view owns Escape.
     if !app.modal_open() && !app.palette_open && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -77,8 +85,13 @@ pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 ui.set_width(ui.available_width());
                 let mut any = false;
                 for category in TOOL_CATEGORIES {
-                    let found: Vec<_> =
-                        category.groups.iter().filter(|id| super::tool_listed(id)).filter_map(|id| catalog::group(id)).filter_map(|g| matches(&query, g).map(|m| (g, m))).collect();
+                    let found: Vec<_> = category
+                        .groups
+                        .iter()
+                        .filter(|id| super::tool_listed(id))
+                        .filter_map(|id| catalog::group(id))
+                        .filter_map(|g| matches(&query, g).map(|m| (g, m)))
+                        .collect();
                     if found.is_empty() {
                         continue;
                     }

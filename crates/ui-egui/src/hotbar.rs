@@ -81,6 +81,9 @@ impl Hotbar {
         if let Some(id) = tools.iter().find(|id| command(id).is_none()) {
             return Err(format!("Unknown hotbar command: {id}"));
         }
+        if let Some(id) = tools.iter().find(|id| !crate::commands::offered(id)) {
+            return Err(format!("Hotbar command not offered in this build: {id}"));
+        }
         self.tools = tools;
         self.normalize();
         Ok(())
@@ -150,6 +153,10 @@ fn matches_search(spec: &pdfcraft_engine::commands::CommandSpec, query: &str) ->
 fn tool_buttons(ui: &mut egui::Ui, app: &PdfCraftApp, tools: &[String], cell: f32, run: &mut Option<&'static str>, remove: &mut Option<usize>) {
     for (index, id) in tools.iter().enumerate() {
         let Some(spec) = command(id) else { continue };
+        // A saved tool the editor does not offer (Save on the web) has no button; it stays in the list.
+        if !crate::commands::offered(id) {
+            continue;
+        }
         let active = crate::comments::CommentTool::from_command(id).is_some_and(|tool| app.quick_tool == crate::QuickTool::Comment(tool));
         let button = ui.add_enabled_ui(app.command_enabled(spec), |ui| icons::button(ui, spec.icon, cell, active, tl!(spec.label))).inner;
         if button.clicked() {
@@ -166,19 +173,26 @@ fn tool_buttons(ui: &mut egui::Ui, app: &PdfCraftApp, tools: &[String], cell: f3
 
 /// Render core quick tools: Select, Hand, Comment groups, Edit text, and Fill & Sign.
 fn core_tool_buttons(ui: &mut egui::Ui, app: &mut PdfCraftApp, cell: f32, popup_align: egui::RectAlign, t: &Tokens) {
-    if icons::button(ui, "mouse-pointer-2", cell, app.quick_tool == QuickTool::Select, tl!("Select (V)")).clicked() {
+    // Every button stands for a command and is drawn only where the build offers it (the web
+    // build: fork change "interface-parts-hidden").
+    let offered = crate::commands::offered;
+    if offered("view.select_tool") && icons::button(ui, "mouse-pointer-2", cell, app.quick_tool == QuickTool::Select, tl!("Select (V)")).clicked() {
         app.quick_tool = QuickTool::Select;
     }
-    if icons::button(ui, "hand", cell, app.quick_tool == QuickTool::Hand, tl!("Hand (H)")).clicked() {
+    if offered("view.hand_tool") && icons::button(ui, "hand", cell, app.quick_tool == QuickTool::Hand, tl!("Hand (H)")).clicked() {
         app.quick_tool = QuickTool::Hand;
     }
     // Comment ▸, Highlight ▸, Draw ▸ (Acrobat's comment toolbar groups). Clicking a
     // group selects its last-used tool; clicking it again opens the flyout.
     for g in 0..comments::GROUPS.len() {
-        let current = app.comment_prefs.group_tool[g];
+        // The tools of the group the build offers; none, no button. The button shows the last
+        // used tool when it is one of them, else the first.
+        let tools: Vec<comments::CommentTool> = comments::GROUPS[g].iter().copied().filter(|tool| offered(tool.command())).collect();
+        let Some(first) = tools.first().copied() else { continue };
+        let current = Some(app.comment_prefs.group_tool[g]).filter(|tool| tools.contains(tool)).unwrap_or(first);
         let active = matches!(app.quick_tool, QuickTool::Comment(t) if t.group() == g);
         let resp = icons::button(ui, current.icon(), cell, active, tl!(current.label()));
-        if comments::GROUPS[g].len() == 1 {
+        if tools.len() == 1 {
             if resp.clicked() {
                 app.execute(current.command());
             }
@@ -193,7 +207,7 @@ fn core_tool_buttons(ui: &mut egui::Ui, app: &mut PdfCraftApp, cell: f32, popup_
             app.execute(current.command());
         }
         egui::Popup::menu(&resp).open_memory(open.then_some(egui::SetOpenCommand::Toggle)).align(popup_align).gap(6.0).show(|ui| {
-            for tool in comments::GROUPS[g] {
+            for tool in &tools {
                 let on = app.quick_tool == QuickTool::Comment(*tool);
                 let (row, click) = ui.allocate_exact_size(vec2(180.0, 28.0), Sense::click());
                 let press = theme::Press::track(ui, &click);
@@ -224,7 +238,7 @@ fn core_tool_buttons(ui: &mut egui::Ui, app: &mut PdfCraftApp, cell: f32, popup_
     }
     // Edit text & images, while the Edit workspace is open (Acrobat's Edit toolbar)
     // or the tool is in use.
-    if app.mode == crate::Mode::Edit || app.quick_tool == QuickTool::EditText {
+    if offered("edit.edit_text") && (app.mode == crate::Mode::Edit || app.quick_tool == QuickTool::EditText) {
         let on = app.quick_tool == QuickTool::EditText;
         if icons::button(ui, "text-cursor-input", cell, on, tl!("Edit text & images")).clicked() {
             if on {
@@ -235,6 +249,10 @@ fn core_tool_buttons(ui: &mut egui::Ui, app: &mut PdfCraftApp, cell: f32, popup_
         }
     }
     // Fill & Sign ▸ (text, marks, date, signature).
+    // Fill & Sign has no command the web build offers: without one, no button.
+    if !crate::fill_sign::FILL_TOOLS.iter().any(|tool| offered(tool.command())) {
+        return;
+    }
     let current_fill = match app.quick_tool {
         QuickTool::Fill(f) => Some(f),
         _ => None,
@@ -262,7 +280,7 @@ fn core_tool_buttons(ui: &mut egui::Ui, app: &mut PdfCraftApp, cell: f32, popup_
     let open = (resp.clicked() && current_fill.is_some()) || resp.secondary_clicked();
     egui::Popup::menu(&resp).open_memory(open.then_some(egui::SetOpenCommand::Toggle)).align(popup_align).gap(6.0).show(|ui| {
         for tool in crate::fill_sign::FILL_TOOLS {
-            if matches!(tool, crate::fill_sign::FillTool::Signature | crate::fill_sign::FillTool::Initials) {
+            if matches!(tool, crate::fill_sign::FillTool::Signature | crate::fill_sign::FillTool::Initials) || !offered(tool.command()) {
                 continue;
             }
             let on = current_fill == Some(tool);

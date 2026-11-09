@@ -99,6 +99,14 @@ pub(crate) fn ellipsized_prefix(text: &str, mut fits: impl FnMut(&str) -> bool) 
     }
 }
 
+/// Select the whole of `text` in the text field `id`, as its state is kept between frames.
+fn select_all(ctx: &egui::Context, id: egui::Id, text: &str) {
+    let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+    let end = egui::text::CCursor::new(text.chars().count());
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), end)));
+    state.store(ctx, id);
+}
+
 /// How a bookmark's title is drawn: in its own style and colour (ISO 32000-2 §12.3.3, Tables 151
 /// and 152), bold in the heavier face and italic slanted, its colour kept readable on the panel.
 /// Top-level bookmarks without a style keep the medium face.
@@ -149,7 +157,19 @@ pub(super) fn outline_item(
         ui.horizontal(|ui| {
             ui.add_space(x_text);
             crate::widgets::begin_dialog(ui);
-            let edit = crate::widgets::line(text).desired_width(ui.available_width() - 8.0).id(id.with("rename"));
+            let edit_id = id.with("rename");
+            // The editor opens with the whole current title selected, so typing replaces it: after
+            // New bookmark, from the row's menu and by double-click alike. egui collapses the
+            // selection of a field that does not own the keyboard yet, so it is set again on each
+            // of the first frames, before the field is drawn, until the focus has taken hold.
+            let frames_id = edit_id.with("selected-frames");
+            let frames = ui.data(|d| d.get_temp::<u8>(frames_id)).unwrap_or(0);
+            if frames < 3 {
+                select_all(ui.ctx(), edit_id, text.as_str());
+                ui.data_mut(|d| d.insert_temp(frames_id, frames + 1));
+                ui.ctx().request_repaint();
+            }
+            let edit = crate::widgets::line(text).desired_width(ui.available_width() - 8.0).id(edit_id);
             let resp = ui.add(edit);
             if !resp.has_focus() && !resp.lost_focus() {
                 resp.request_focus();
@@ -169,6 +189,8 @@ pub(super) fn outline_item(
             }
         }
     } else {
+        // Not renaming this bookmark: the next rename selects its title again.
+        ui.data_mut(|d| d.remove::<u8>(id.with("rename").with("selected-frames")));
         // The page label sits right-aligned in its own bounded column, and the title wraps to
         // what is really left of it — a long label painted over a long title was the overlap
         // of #124.

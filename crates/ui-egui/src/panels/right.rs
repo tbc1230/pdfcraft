@@ -104,11 +104,19 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             let more = icons::button(ui, "ellipsis", 26.0, false, tl!("Bookmark options"));
                             egui::Popup::menu(&more).show(|ui| {
                                 ui.set_min_width(200.0);
-                                if bm_editable && ui.button(tl!("New bookmarks from structure")).clicked() {
+                                // These two run registry commands: drawn only where the build offers them
+                                // (the web build: fork change "interface-parts-hidden").
+                                if bm_editable
+                                    && crate::commands::offered("bookmark.from_structure")
+                                    && ui.button(tl!("New bookmarks from structure")).clicked()
+                                {
                                     bm_action = Some(BmAction::FromStructure);
                                     ui.close();
                                 }
-                                if bm_editable && ui.button(tl!("New bookmarks from text styles…")).clicked() {
+                                if bm_editable
+                                    && crate::commands::offered("bookmark.from_text_styles")
+                                    && ui.button(tl!("New bookmarks from text styles…")).clicked()
+                                {
                                     bm_action = Some(BmAction::FromTextStyles);
                                     ui.close();
                                 }
@@ -141,7 +149,11 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             });
                         }
                         let new_tip = crate::commands::command_tip(ui.ctx(), tl!("New bookmark ({key})"), "bookmark.add");
-                        if panel == RightPanel::Bookmarks && bm_editable && icons::button(ui, "bookmark-plus", 26.0, false, &new_tip).clicked() {
+                        if panel == RightPanel::Bookmarks
+                            && bm_editable
+                            && crate::commands::offered("bookmark.add")
+                            && icons::button(ui, "bookmark-plus", 26.0, false, &new_tip).clicked()
+                        {
                             bm_action = Some(BmAction::New);
                         }
                     });
@@ -388,7 +400,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     if let Some((name, widget)) = field_properties {
         app.open_field_props(&name, widget);
     }
-    if let Some(c) = panel_command {
+    if let Some(c) = panel_command.filter(|c| crate::commands::offered(c)) {
         app.run_command(c);
     }
     if let Some(a) = a11y_action {
@@ -398,7 +410,11 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         app.compare_action(index, a);
     }
     match sig_action {
-        Some(crate::sign_ui::PanelAction::Validate) => app.run_command("sign.validate"),
+        Some(crate::sign_ui::PanelAction::Validate) => {
+            if crate::commands::offered("sign.validate") {
+                app.run_command("sign.validate");
+            }
+        }
         Some(crate::sign_ui::PanelAction::GoTo(p)) => app.views[index].go_to_page(p),
         Some(crate::sign_ui::PanelAction::Trust(c)) => app.trust_certificate(*c),
         Some(crate::sign_ui::PanelAction::ViewCertificate(chain)) => {

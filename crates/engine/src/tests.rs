@@ -1181,6 +1181,7 @@ fn reset_layers_returns_to_the_files_visibility() {
         pages: None,
         at: 1,
         field_conflicts: pdfcraft_organize::FieldConflicts::Rename,
+        password: None,
     };
     s.apply(id, edit).unwrap();
     let blue = s.get(id).unwrap().info.layers.iter().position(|l| l.name == "Blue").unwrap();
@@ -1256,6 +1257,7 @@ fn combine_extract_split_and_insert_from_file() {
             pages: Some(vec![1]),
             at: 1,
             field_conflicts: pdfcraft_organize::FieldConflicts::Rename,
+            password: None,
         },
     )
     .unwrap();
@@ -1271,6 +1273,7 @@ fn combine_extract_split_and_insert_from_file() {
             pages: None,
             at: 0,
             field_conflicts: pdfcraft_organize::FieldConflicts::Rename,
+            password: None,
         },
     );
     assert!(matches!(bad, Err(EditError::Source(_))));
@@ -1327,6 +1330,7 @@ fn insert_from_file_renames_colliding_fields_and_notes_it() {
             pages: None,
             at: 1,
             field_conflicts: pdfcraft_organize::FieldConflicts::Rename,
+            password: None,
         },
     )
     .unwrap();
@@ -3678,6 +3682,7 @@ fn create_and_reduce() {
             pages: None,
             at: 1,
             field_conflicts: pdfcraft_organize::FieldConflicts::Rename,
+            password: None,
         },
     )
     .unwrap();
@@ -10525,4 +10530,147 @@ fn imported_bookmarks_undo_in_one_step() {
     let err = s.apply(id, Edit::ImportBookmarks { parent: vec![4], index: 0, bookmarks, replace: false }).unwrap_err();
     assert!(err.to_string().contains("no bookmark"), "{err}");
     assert!(s.get(id).unwrap().info.outline.is_empty());
+}
+
+/// A `w` x `h` px RGB PNG, with a resolution in pixels per metre when `ppm` is given.
+fn size_rule_png(w: u32, h: u32, ppm: Option<u32>) -> Vec<u8> {
+    let mut png = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut png, w, h);
+        enc.set_color(png::ColorType::Rgb);
+        if let Some(ppm) = ppm {
+            enc.set_pixel_dims(Some(png::PixelDimensions { xppu: ppm, yppu: ppm, unit: png::Unit::Meter }));
+        }
+        let mut writer = enc.write_header().unwrap();
+        writer.write_image_data(&vec![0u8; (w * h * 3) as usize]).unwrap();
+    }
+    png
+}
+
+#[test]
+fn the_natural_size_of_an_added_image_is_its_pixels_at_its_resolution() {
+    // No resolution: one point per pixel (72 dpi).
+    let png = size_rule_png(480, 180, None);
+    assert_eq!(crate::added_image_natural_size("wide.png", &png).unwrap(), (480.0, 180.0));
+    // 2835 pixels per metre is 72.009 dpi: within a hundredth of a point of the pixel count.
+    let dense = size_rule_png(100, 50, Some(5669));
+    let (w, h) = crate::added_image_natural_size("dense.png", &dense).unwrap();
+    assert!((w - 50.0).abs() < 0.1 && (h - 25.0).abs() < 0.1, "{w} x {h}");
+}
+
+#[test]
+fn the_natural_size_is_the_size_the_add_image_edit_embeds() {
+    let (mut s, id) = session_with(1);
+    let png = size_rule_png(40, 20, None);
+    let natural = crate::added_image_natural_size("p.png", &png).unwrap();
+    s.apply(id, Edit::AddImage { page: 0, rect: None, name: "p.png".into(), bytes: Arc::new(png) }).unwrap();
+    // The page is 200 x 300: the image fits, so it is placed at its natural size, centred.
+    let rect = s.get(id).unwrap().added()[0].content.rect();
+    assert!(((rect[2] - rect[0]) - natural.0).abs() < 1e-9 && ((rect[3] - rect[1]) - natural.1).abs() < 1e-9, "{rect:?} vs {natural:?}");
+}
+
+#[test]
+fn the_natural_size_refuses_bytes_that_are_not_an_image() {
+    let png = size_rule_png(480, 180, None);
+    for (what, bytes) in [("empty", Vec::new()), ("text", b"not an image".to_vec()), ("a pdf", fixture(1)), ("truncated", png[..20].to_vec())] {
+        let e = crate::added_image_natural_size("x.png", &bytes);
+        assert!(e.is_err(), "{what}: {e:?}");
+        assert!(!e.unwrap_err().to_string().is_empty(), "{what}: the error says why");
+    }
+}
+
+#[test]
+fn an_added_image_is_capped_to_eighty_percent_of_the_page_and_never_enlarged() {
+    let close = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9;
+    // Fits: unchanged.
+    assert_eq!(crate::fit_added_image((20.0, 10.0), (200.0, 300.0)), (20.0, 10.0));
+    // Too wide for a small page: 80 percent of 200 is 160, the shape is kept.
+    let fitted = crate::fit_added_image((480.0, 180.0), (200.0, 300.0));
+    assert!(close(fitted, (160.0, 60.0)), "{fitted:?}");
+    // Too tall: the height is capped.
+    let fitted = crate::fit_added_image((100.0, 1000.0), (200.0, 300.0));
+    assert!(close(fitted, (24.0, 240.0)), "{fitted:?}");
+    // A size that is not usable is returned as it is.
+    assert_eq!(crate::fit_added_image((0.0, 10.0), (200.0, 300.0)), (0.0, 10.0));
+    assert_eq!(crate::fit_added_image((10.0, 10.0), (0.0, 300.0)), (10.0, 10.0));
+}
+
+#[test]
+fn the_add_image_edit_places_a_large_image_by_the_same_rule() {
+    let (mut s, id) = session_with(1);
+    let png = size_rule_png(480, 180, None);
+    s.apply(id, Edit::AddImage { page: 0, rect: None, name: "wide.png".into(), bytes: Arc::new(png) }).unwrap();
+    let rect = s.get(id).unwrap().added()[0].content.rect();
+    let expect = [20.0, 120.0, 180.0, 180.0];
+    assert!(rect.iter().zip(expect).all(|(a, b)| (a - b).abs() < 1e-6), "{rect:?}");
+}
+
+/// A one-page document that is locked: its open password is `pw`, its owner password `owner`.
+fn locked_source() -> Arc<Vec<u8>> {
+    let (mut s, id) = session_with(1);
+    s.apply(id, Edit::Protect(protection(Some("pw"), Some("owner")))).unwrap();
+    s.save_bytes(id).unwrap()
+}
+
+fn insert_from(bytes: Arc<Vec<u8>>, password: Option<&str>) -> Edit {
+    Edit::InsertPagesFrom {
+        name: "b.pdf".into(),
+        bytes,
+        pages: None,
+        at: 1,
+        field_conflicts: pdfcraft_organize::FieldConflicts::Rename,
+        password: password.map(crate::SourcePassword::new),
+    }
+}
+
+#[test]
+fn inserting_pages_of_a_locked_file_needs_its_password() {
+    let (mut s, id) = session_with(3);
+    let locked = locked_source();
+    // None: a source error that combine_source_check calls Password, not a wrong password.
+    let none = s.apply(id, insert_from(locked.clone(), None)).unwrap_err();
+    assert!(matches!(none, EditError::Source(_)), "{none:?}");
+    assert!(none.to_string().contains("password-protected"), "{none}");
+    assert_eq!(crate::combine_source_check(&locked, None), Err(crate::SourceProblem::Password));
+    // Wrong: its own error.
+    let wrong = s.apply(id, insert_from(locked.clone(), Some("nope"))).unwrap_err();
+    assert_eq!(wrong, EditError::WrongPassword);
+    assert!(!wrong.to_string().contains("nope"));
+    // Neither changed the document.
+    assert_eq!(page_texts(&s, id).len(), 3);
+    assert_eq!(s.get(id).unwrap().can_undo(), None);
+    // Right (the owner's, which also allows copying pages): inserted, one undo step.
+    s.apply(id, insert_from(locked.clone(), Some("owner"))).unwrap();
+    assert_eq!(page_texts(&s, id).len(), 4);
+    let label = s.get(id).unwrap().can_undo().unwrap().to_string();
+    assert_eq!(label, "Insert pages from b.pdf");
+    assert_eq!(s.undo(id).unwrap().as_str(), "Insert pages from b.pdf");
+    assert_eq!(page_texts(&s, id).len(), 3);
+    // The open password alone reads the file, but its permissions withhold assembling pages.
+    let limited = s.apply(id, insert_from(locked, Some("pw"))).unwrap_err();
+    assert!(matches!(limited, EditError::Source(_)), "{limited:?}");
+}
+
+#[test]
+fn the_password_of_an_inserted_file_is_in_no_text() {
+    let edit = insert_from(locked_source(), Some("secret-owner-pw"));
+    assert!(!format!("{edit:?}").contains("secret-owner-pw"), "{edit:?}");
+    assert!(!edit.label().as_str().contains("secret-owner-pw"));
+    let (mut s, id) = session_with(1);
+    let e = s.apply(id, edit).unwrap_err();
+    assert!(!e.to_string().contains("secret-owner-pw") && !format!("{e:?}").contains("secret-owner-pw"), "{e:?}");
+}
+
+#[test]
+fn inserting_pages_of_bytes_that_are_not_a_pdf_fails_and_changes_nothing() {
+    let (mut s, id) = session_with(2);
+    let generation = s.get(id).unwrap().edit_generation();
+    for (what, bytes) in [("empty", Vec::new()), ("text", b"nope".to_vec()), ("random", (0..=255u8).cycle().take(4096).collect())] {
+        let e = s.apply(id, insert_from(Arc::new(bytes), None)).unwrap_err();
+        assert!(matches!(e, EditError::Source(_)), "{what}: {e:?}");
+        assert!(e.to_string().starts_with("couldn't use b.pdf"), "{what}: {e}");
+        assert_eq!(page_texts(&s, id).len(), 2, "{what}");
+        assert_eq!(s.get(id).unwrap().can_undo(), None, "{what}");
+        assert_eq!(s.get(id).unwrap().edit_generation(), generation, "{what}");
+    }
 }

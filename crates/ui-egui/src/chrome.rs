@@ -30,6 +30,12 @@ const STRIP_BUTTON: f32 = 28.0;
 /// Draw the window's tab strip: home and open controls, shrinkable and scrollable document tabs with drag
 /// reordering, and platform window controls.
 pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
+    // The web build draws no tab strip (`app.rs` does not call this); this keeps its Open,
+    // Combine, Preferences, theme and Discord buttons and the tab menu from ever drawing there
+    // (fork change "interface-parts-hidden").
+    if cfg!(target_arch = "wasm32") {
+        return;
+    }
     let t = Tokens::get(ui.ctx());
     // macOS: the strip is the 28 pt title bar, so the traffic lights are centred in it; tabs and
     // buttons shrink to keep a margin above and below.
@@ -273,7 +279,7 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 }
                 ui.add_space(4.0);
                 let tip = crate::commands::command_tip(ui.ctx(), tl!("Open a PDF ({key})"), "file.open");
-                if widgets::ghost_button_sized(ui, "plus", tl!("Open"), tab_h).on_hover_text(tip).clicked() {
+                if crate::commands::offered("file.open") && widgets::ghost_button_sized(ui, "plus", tl!("Open"), tab_h).on_hover_text(tip).clicked() {
                     app.open_dialog();
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -287,7 +293,7 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         });
                         ui.add_space(window_controls::SIDE_GAP - 4.0);
                     }
-                    if icons::button(ui, "settings", button, false, tl!("Preferences")).clicked() {
+                    if crate::commands::offered("app.preferences") && icons::button(ui, "settings", button, false, tl!("Preferences")).clicked() {
                         app.execute("app.preferences");
                     }
                     let (icon, label) = match app.theme_preference {
@@ -298,7 +304,7 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     let tip = format!("{}: {label}", tl!("Display theme"));
                     let response = icons::button(ui, icon, button, false, &tip);
                     // A click cycles System, Light, Dark; a right-click opens the menu.
-                    if response.clicked() {
+                    if crate::commands::offered("view.theme") && response.clicked() {
                         app.execute(match app.theme_preference {
                             ThemePreference::System => "view.theme.light",
                             ThemePreference::Light => "view.theme.dark",
@@ -310,7 +316,11 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         app.dialog = Some(Dialog::Shortcuts);
                     }
                     // One click to the community, from anywhere in the app.
-                    if widgets::ghost_button_sized(ui, "messages-square", "Discord", tab_h).on_hover_text(pdfcraft_engine::links::DISCORD).clicked() {
+                    if crate::commands::offered("help.discord")
+                        && widgets::ghost_button_sized(ui, "messages-square", "Discord", tab_h)
+                            .on_hover_text(pdfcraft_engine::links::DISCORD)
+                            .clicked()
+                    {
                         app.execute("help.discord");
                     }
                 });
@@ -477,6 +487,13 @@ fn tab(ui: &mut egui::Ui, spec: TabSpec<'_>, close: &mut Option<usize>) -> egui:
     theme::hand(resp).on_hover_text(if dirty { crate::i18n::fmt(tl!("{name} — unsaved changes"), &[("name", &shown)]) } else { shown })
 }
 
+/// Whether the mode bar has a tab for this mode. The web build has only Edit: no All tools tab (no
+/// catalogue), and neither Convert nor E-Sign, which open Export a PDF and Fill & Sign, tool groups
+/// the web build does not offer. The modes themselves stay. `web` is whether this is the web build.
+fn mode_tab_offered(mode: Mode, web: bool) -> bool {
+    !web || matches!(mode, Mode::Edit)
+}
+
 pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     egui::Panel::top("mode_bar")
@@ -495,6 +512,9 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 // Acrobat's mode bar has no Read tab: reading is what the viewer does with no tool
                 // in use. Read mode (the panes hidden) stays a View command and a default workspace.
                 for (mode, label) in [(Mode::AllTools, "All tools"), (Mode::Edit, "Edit"), (Mode::Convert, "Convert"), (Mode::Sign, "E-Sign")] {
+                    if !mode_tab_offered(mode, cfg!(target_arch = "wasm32")) {
+                        continue;
+                    }
                     if widgets::mode_tab(ui, tl!(label), app.mode == mode).clicked() {
                         app.switch_mode(mode, true);
                     }
@@ -506,19 +526,24 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         let tip = crate::commands::command_tip(ui.ctx(), tl!("Print ({key})"), "print.dialog");
                         // A document that forbids printing says so here, before the dialog (#2669).
                         let may_print = !has_doc || pdfcraft_engine::commands::command("print.dialog").is_some_and(|c| app.command_enabled(c));
-                        let mut print = ui.add_enabled_ui(may_print, |ui| icons::button(ui, "printer", 32.0, false, &tip)).inner;
-                        if !may_print {
-                            print = print.on_disabled_hover_text(crate::print_refused());
+                        if crate::commands::offered("print.dialog") {
+                            let mut print = ui.add_enabled_ui(may_print, |ui| icons::button(ui, "printer", 32.0, false, &tip)).inner;
+                            if !may_print {
+                                print = print.on_disabled_hover_text(crate::print_refused());
+                            }
+                            if print.clicked() {
+                                app.run_command("print.dialog");
+                            }
                         }
-                        if print.clicked() {
-                            app.run_command("print.dialog");
-                        }
-                        let tip = crate::commands::command_tip(ui.ctx(), tl!("Save ({key})"), "file.save");
-                        if icons::button(ui, "save", 32.0, false, &tip).clicked() {
-                            app.run_command("file.save");
+                        // Workspace saves with its own buttons; the web build has no Save here.
+                        if crate::commands::offered("file.save") {
+                            let tip = crate::commands::command_tip(ui.ctx(), tl!("Save ({key})"), "file.save");
+                            if icons::button(ui, "save", 32.0, false, &tip).clicked() {
+                                app.run_command("file.save");
+                            }
                         }
                         let tip = crate::commands::command_tip(ui.ctx(), tl!("Document properties ({key})"), "file.properties");
-                        if icons::button(ui, "info", 32.0, false, &tip).clicked() {
+                        if crate::commands::offered("file.properties") && icons::button(ui, "info", 32.0, false, &tip).clicked() {
                             app.dialog = Some(Dialog::Properties(PropsTab::Description));
                         }
                     });
@@ -568,12 +593,17 @@ pub fn right_rail(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     );
     let page_count = doc.info.pages.len();
     let labels: Vec<String> = doc.info.pages.iter().map(|p| p.label.clone()).collect();
+    // A panel the build does not offer has no rail button (the web build: fork change
+    // "interface-parts-hidden").
     let item = |panel: RightPanel, icon: &str, label: &str, marker: Option<&str>| {
+        if !crate::panels::panel_offered(panel) {
+            return None;
+        }
         let item = RailItem::new(panel, icons::source(icon), tl!(label)).marker(marker.is_some());
-        match marker {
+        Some(match marker {
             Some(marker) => item.marker_label(tl!(marker)),
             None => item,
-        }
+        })
     };
     let has = |has: bool, label: &'static str| has.then_some(label);
     let mut items = vec![
@@ -584,11 +614,14 @@ pub fn right_rail(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         item(RightPanel::Layers, "layers", "Layers", has(has_layers, "Has layers")),
         item(RightPanel::Attachments, "paperclip", "Attachments", has(has_files, "Has attachments")),
         item(RightPanel::Signatures, "signature", "Signatures", has(has_signatures, "Signed")),
-    ];
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     if has_check {
-        items.push(item(RightPanel::Accessibility, "accessibility", "Accessibility Checker", None));
+        items.extend(item(RightPanel::Accessibility, "accessibility", "Accessibility Checker", None));
     }
-    items.push(item(RightPanel::Tags, "tag", "Tags", None));
+    items.extend(item(RightPanel::Tags, "tag", "Tags", None));
     let view = &mut app.views[index];
     let mut page_display = None;
     let rail = Rail::new(egui::Id::unique("rail"))
@@ -675,10 +708,14 @@ pub fn right_rail(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     view.step_page(false);
                 }
                 // History is distinct from stepping to the adjacent page, and belongs to this tab.
-                for (forward, icon, label, shortcut, enabled) in [
-                    (true, "chevron-right", tl!("Next view"), crate::commands::NEXT_VIEW, !view.forward.is_empty()),
-                    (false, "chevron-left", tl!("Previous view"), crate::commands::PREV_VIEW, !view.back.is_empty()),
+                for (forward, icon, label, shortcut, enabled, command) in [
+                    (true, "chevron-right", tl!("Next view"), crate::commands::NEXT_VIEW, !view.forward.is_empty(), "view.next_view"),
+                    (false, "chevron-left", tl!("Previous view"), crate::commands::PREV_VIEW, !view.back.is_empty(), "view.previous_view"),
                 ] {
+                    // The buttons stand for commands: drawn only where the build offers them.
+                    if !crate::commands::offered(command) {
+                        continue;
+                    }
                     let tip = format!("{label} ({})", crate::commands::shortcut_label(ui.ctx(), shortcut));
                     if ui.add_enabled_ui(enabled, |ui| icons::button(ui, icon, 30.0, false, &tip)).inner.clicked() {
                         view.view_history(forward);
@@ -749,22 +786,24 @@ fn page_display_menu(ui: &mut egui::Ui, view: &DocView) -> Option<&'static str> 
     ui.label(egui::RichText::new(tl!("Page display")).color(t.text_faint).small());
     let mut picked = None;
     for l in PageLayout::ORDER {
-        if ui.add(widgets::radio(view.layout == l, tl!(l.label()))).clicked() {
+        if crate::commands::offered(l.command()) && ui.add(widgets::radio(view.layout == l, tl!(l.label()))).clicked() {
             picked = Some(l.command());
         }
     }
     ui.separator();
     // Continuous scrolling is an independent checkbox over the base layout, as in Acrobat (#752).
     let mut continuous = view.continuous();
-    if ui.add(widgets::checkbox(&mut continuous, tl!("Continuous scrolling"))).changed() {
+    if crate::commands::offered("view.continuous") && ui.add(widgets::checkbox(&mut continuous, tl!("Continuous scrolling"))).changed() {
         picked = Some("view.continuous");
     }
     let mut gaps = view.show_page_gaps;
-    if ui.add(widgets::checkbox(&mut gaps, tl!("Show gaps between pages"))).changed() {
+    if crate::commands::offered("view.page_gaps") && ui.add(widgets::checkbox(&mut gaps, tl!("Show gaps between pages"))).changed() {
         picked = Some("view.page_gaps");
     }
     let mut cover = view.cover;
-    if ui.add_enabled(view.cover_applies(), widgets::checkbox(&mut cover, tl!("Show cover page in two-page view"))).changed() {
+    if crate::commands::offered("view.layout.cover")
+        && ui.add_enabled(view.cover_applies(), widgets::checkbox(&mut cover, tl!("Show cover page in two-page view"))).changed()
+    {
         picked = Some("view.layout.cover");
     }
     if picked.is_some() {
@@ -778,7 +817,7 @@ fn page_display_menu(ui: &mut egui::Ui, view: &DocView) -> Option<&'static str> 
 fn rail_view_menu(ui: &mut egui::Ui, view: &mut DocView) -> Option<&'static str> {
     let mut picked = None;
     for (id, label) in [("view.fit_width_scrolling", "Fit to width scrolling"), ("view.fit_one_page", "Fit one full page")] {
-        if ui.button(tl!(label)).clicked() {
+        if crate::commands::offered(id) && ui.button(tl!(label)).clicked() {
             picked = Some(id);
         }
     }
@@ -791,14 +830,14 @@ fn rail_view_menu(ui: &mut egui::Ui, view: &mut DocView) -> Option<&'static str>
         view.set_fit(Fit::Page);
         ui.close();
     }
-    if ui.button(tl!("Fit visible")).clicked() {
+    if crate::commands::offered("view.fit_visible") && ui.button(tl!("Fit visible")).clicked() {
         picked = Some("view.fit_visible");
     }
     ui.separator();
     picked = page_display_menu(ui, view).or(picked);
     ui.separator();
     for (id, label) in [("view.read_mode", "Read mode"), ("view.full_screen", "Full screen mode")] {
-        if ui.button(tl!(label)).clicked() {
+        if crate::commands::offered(id) && ui.button(tl!(label)).clicked() {
             picked = Some(id);
         }
     }
@@ -905,5 +944,25 @@ mod tab_widths {
         assert_eq!(MAC_CONTENT_LEFT - lights_end, margin);
         // `egui::Margin` is in `i8`.
         assert!(MAC_CONTENT_LEFT <= f32::from(i8::MAX));
+    }
+}
+
+#[cfg(test)]
+mod mode_tab_tests {
+    use super::{Mode, mode_tab_offered};
+
+    #[test]
+    fn the_desktop_build_has_every_mode_tab() {
+        for mode in [Mode::AllTools, Mode::Edit, Mode::Convert, Mode::Sign] {
+            assert!(mode_tab_offered(mode, false), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn the_web_build_has_only_the_edit_tab() {
+        assert!(!mode_tab_offered(Mode::AllTools, true));
+        assert!(!mode_tab_offered(Mode::Convert, true));
+        assert!(!mode_tab_offered(Mode::Sign, true));
+        assert!(mode_tab_offered(Mode::Edit, true));
     }
 }

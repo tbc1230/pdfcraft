@@ -68,7 +68,7 @@ use pdfcraft_engine::{DocId, Session};
 
 pub use canvas::{DocView, RasterMemory};
 pub use editing::{CloseRequest, SaveTarget};
-pub use files::{ExtractDraft, FilePurpose, FileRequest, RotateDraft, SplitDraft, SplitMode, SplitPlan};
+pub use files::{ExtractDraft, FilePurpose, FileRequest, InsertFromBytesError, RotateDraft, SplitDraft, SplitMode, SplitPlan};
 pub use recovery::{AUTOSAVE_SECS, RecoveryMeta, RecoveryStore, default_dictionary_dir};
 use theme::{ThemeKind, ThemePreference};
 pub use workflows::ocr_verify::{OcrVerify, Phase};
@@ -84,6 +84,7 @@ mod workflows;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod os_clipboard;
 
+pub use app::host_calls::{HostCall, HostCalls, HostPassword, HostStateFn, SavedBytes, no_document_state};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use app::same_file;
 pub(crate) use app::{MAX_AUTHOR_CHARS, copy_refused, date_text_for_pdf, print_refused};
@@ -110,7 +111,7 @@ use dialogs::protect;
 use dialogs::standards_ui;
 use dialogs::word_count_ui;
 pub use home::folders_ui;
-pub use hooks::{FailedInbox, HostDirtyFn, HostSaveFn, Inbox, OsEvent, OsEventsFn};
+pub use hooks::{AuthorInbox, FailedInbox, HostDirtyFn, HostSaveFn, Inbox, LanguageInbox, OsEvent, OsEventsFn, ThemeInbox};
 use menus::tab_context;
 use panels::all_tools_ui;
 use panels::comments_panel;
@@ -457,6 +458,14 @@ pub struct PdfCraftApp {
     /// arrival opens in the background once the user has started working (#171).
     pub startup_inbox: Inbox,
     startup_superseded: bool,
+    /// The author name the embedding page sets (web); taken each frame by [`PdfCraftApp::set_author`].
+    pub author_inbox: AuthorInbox,
+    /// The theme the embedding page sets (web); taken each frame and applied like the Appearance choice.
+    pub theme_inbox: ThemeInbox,
+    /// The author name was set by the host: the editor shows it but does not let the user change it.
+    pub author_locked: bool,
+    /// The interface language the embedding page sets (web); taken each frame and stored as the `language` preference.
+    pub language_inbox: LanguageInbox,
     /// Asynchronous opens that failed (web `?file=` fetches), shown as a notice.
     pub failed_inbox: FailedInbox,
     /// Mirrors "some document has unsaved work" each frame, so the web page's `beforeunload` handler can read it (#812).
@@ -467,6 +476,12 @@ pub struct PdfCraftApp {
     pub host_save: Option<HostSaveFn>,
     /// Reports unsaved work to the embedding page (web, see [`HostDirtyFn`]).
     pub host_dirty: Option<HostDirtyFn>,
+    /// The page's save and command calls, served once a frame (web, see [`HostCall`]).
+    pub host_calls: HostCalls,
+    /// Told the editor state each time it changes (web, see [`HostStateFn`]).
+    pub host_state: Option<HostStateFn>,
+    /// The last state sent to `host_state`.
+    host_state_last: Option<serde_json::Value>,
     /// A pending "save changes?" question (closing a dirty tab or quitting).
     pub close_request: Option<CloseRequest>,
     /// The button of the "save changes?" question the keyboard has chosen; Save when it opens.

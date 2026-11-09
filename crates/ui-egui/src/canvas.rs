@@ -25,6 +25,7 @@ pub(super) mod crop;
 mod find;
 pub(super) mod fling;
 pub(super) mod image_pick;
+pub(super) mod image_place;
 mod navigation;
 mod organize;
 pub(super) mod page_cursor;
@@ -674,6 +675,8 @@ pub struct DocView {
     /// A queued Fill & Sign signature: select it after its edit succeeds, then leave placement.
     pub(crate) fill_signature_page: Option<usize>,
     pub(crate) signature_drag: crate::signature_drag::SignatureDrag,
+    /// An image waiting for the click that places it (`canvas/image_place.rs`).
+    pub(crate) image_place: image_place::ImagePlace,
     /// What the page modules claim for the cursor this frame; `document_area` sets it once.
     pub(crate) cursor: crate::page_cursor::PageCursor,
     /// Who the press the pages hold belongs to.
@@ -805,6 +808,8 @@ pub(crate) enum PageMenuAction {
 pub(crate) struct PageMenuPerms {
     pub can_modify: bool,
     pub can_assemble: bool,
+    /// Assembly is allowed and the document has more than one page (the clicked page may go).
+    pub can_delete_page: bool,
     pub can_annotate: bool,
     pub can_print: bool,
     pub can_copy: bool,
@@ -825,60 +830,99 @@ pub(crate) fn default_page_context_menu(ui: &mut egui::Ui, page: usize, at: [f64
         }
     };
     let icon = |ui: &mut egui::Ui, name: &str, tip: &str| crate::icons::button(ui, name, 24.0, false, tip);
+    // An entry that runs a registry command is drawn only where the build offers it (the web
+    // build: fork change "interface-parts-hidden").
+    let offered = crate::commands::offered;
     // Top horizontal icon bar: Rotate CCW, Print, Select tool, Hand tool, Marquee Zoom
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         pick(icon(ui, "rotate-ccw", tl!("Rotate view counterclockwise")), ui, A::RotateCCW);
-        ui.add_enabled_ui(perms.can_print, |ui| pick(icon(ui, "printer", tl!("Print")), ui, A::Print));
-        pick(icon(ui, "mouse-pointer-2", tl!("Select Tool")), ui, A::SelectTool);
-        pick(icon(ui, "hand", tl!("Hand Tool")), ui, A::HandTool);
-        pick(icon(ui, "zoom-in", tl!("Marquee Zoom")), ui, A::MarqueeZoom);
+        if offered("print.dialog") {
+            ui.add_enabled_ui(perms.can_print, |ui| pick(icon(ui, "printer", tl!("Print")), ui, A::Print));
+        }
+        if offered("view.select_tool") {
+            pick(icon(ui, "mouse-pointer-2", tl!("Select Tool")), ui, A::SelectTool);
+        }
+        if offered("view.hand_tool") {
+            pick(icon(ui, "hand", tl!("Hand Tool")), ui, A::HandTool);
+        }
+        if offered("view.marquee_zoom") {
+            pick(icon(ui, "zoom-in", tl!("Marquee Zoom")), ui, A::MarqueeZoom);
+        }
     });
 
     ui.separator();
 
-    pick(
-        ui.add_enabled(
-            perms.can_copy_items,
-            egui::Button::new(tl!("Copy")).shortcut_text(crate::commands::shortcut_label(ui.ctx(), crate::commands::COPY)),
-        ),
-        ui,
-        A::Copy,
-    );
-    pick(
-        ui.add_enabled(
-            perms.can_paste,
-            egui::Button::new(tl!("Paste")).shortcut_text(crate::commands::shortcut_label(ui.ctx(), pdfcraft_engine::commands::Shortcut::cmd("V"))),
-        ),
-        ui,
-        A::Paste(page, at),
-    );
-    if perms.can_paste_comments {
+    if offered("edit.copy") {
+        pick(
+            ui.add_enabled(
+                perms.can_copy_items,
+                egui::Button::new(tl!("Copy")).shortcut_text(crate::commands::shortcut_label(ui.ctx(), crate::commands::COPY)),
+            ),
+            ui,
+            A::Copy,
+        );
+    }
+    // Paste places a copied image or page: `page.paste` is the command it stands for.
+    if offered("page.paste") {
+        pick(
+            ui.add_enabled(
+                perms.can_paste,
+                egui::Button::new(tl!("Paste"))
+                    .shortcut_text(crate::commands::shortcut_label(ui.ctx(), pdfcraft_engine::commands::Shortcut::cmd("V"))),
+            ),
+            ui,
+            A::Paste(page, at),
+        );
+    }
+    if perms.can_paste_comments && offered("comment.paste") {
         pick(ui.button(tl!("Paste comments")), ui, A::PasteComments(page, at));
     }
 
     ui.separator();
 
-    pick(ui.add_enabled(perms.can_annotate, egui::Button::new(tl!("Add comment"))), ui, A::AddComment(page, at));
-    if perms.has_annotations {
+    if offered("comment.note") {
+        pick(ui.add_enabled(perms.can_annotate, egui::Button::new(tl!("Add comment"))), ui, A::AddComment(page, at));
+    }
+    if perms.has_annotations && offered("comment.flatten") {
         pick(ui.add_enabled(perms.can_modify, egui::Button::new(tl!("Flatten comments"))), ui, A::FlattenComments);
     }
-    pick(ui.add_enabled(perms.can_assemble, egui::Button::new(tl!("Add bookmark"))), ui, A::AddBookmark);
-    pick(ui.add_enabled(perms.can_copy, egui::Button::new(tl!("Take a snapshot"))), ui, A::TakeSnapshot);
+    if offered("bookmark.add") {
+        pick(ui.add_enabled(perms.can_assemble, egui::Button::new(tl!("Add bookmark"))), ui, A::AddBookmark);
+    }
+    if offered("edit.snapshot") {
+        pick(ui.add_enabled(perms.can_copy, egui::Button::new(tl!("Take a snapshot"))), ui, A::TakeSnapshot);
+    }
 
     ui.separator();
 
-    pick(ui.add_enabled(perms.can_modify, egui::Button::new(egui::RichText::new(tl!("Edit this PDF")).strong())), ui, A::EditPdf);
-    pick(ui.add_enabled(perms.can_modify, egui::Button::new(tl!("Add text"))), ui, A::AddText);
-    pick(ui.add_enabled(perms.can_modify, egui::Button::new(tl!("Add image"))), ui, A::AddImage);
-    pick(ui.add_enabled(perms.can_assemble, egui::Button::new(tl!("Delete page"))), ui, A::DeletePage(page));
-    pick(ui.add_enabled(perms.can_copy, egui::Button::new(tl!("Export this PDF"))), ui, A::ExportPdf);
+    // "Edit this PDF" opens the Edit tool group.
+    if offered("edit.edit_text") && crate::panels::tool_listed("edit") {
+        pick(ui.add_enabled(perms.can_modify, egui::Button::new(egui::RichText::new(tl!("Edit this PDF")).strong())), ui, A::EditPdf);
+    }
+    if offered("edit.text") {
+        pick(ui.add_enabled(perms.can_modify, egui::Button::new(tl!("Add text"))), ui, A::AddText);
+    }
+    if offered("edit.image") {
+        pick(ui.add_enabled(perms.can_modify, egui::Button::new(tl!("Add image"))), ui, A::AddImage);
+    }
+    if offered("page.delete") {
+        pick(ui.add_enabled(perms.can_delete_page, egui::Button::new(tl!("Delete page"))), ui, A::DeletePage(page));
+    }
+    // The Export tool group is not listed in the web build.
+    if crate::panels::tool_listed("export") {
+        pick(ui.add_enabled(perms.can_copy, egui::Button::new(tl!("Export this PDF"))), ui, A::ExportPdf);
+    }
 
     ui.separator();
 
-    pick(ui.button(tl!("Find text or tools")), ui, A::Find);
+    if offered("edit.find") {
+        pick(ui.button(tl!("Find text or tools")), ui, A::Find);
+    }
     pick(ui.button(tl!("Rotate view clockwise")), ui, A::RotateCW);
-    pick(ui.button(tl!("Document properties…")), ui, A::DocProperties);
+    if offered("file.properties") {
+        pick(ui.button(tl!("Document properties…")), ui, A::DocProperties);
+    }
 }
 
 impl DocView {
@@ -1058,6 +1102,7 @@ impl DocView {
             fill_text: None,
             fill_signature_page: None,
             signature_drag: Default::default(),
+            image_place: Default::default(),
             cursor: Default::default(),
             router: Default::default(),
             press_cancelled: false,
@@ -1572,9 +1617,10 @@ fn draw_page(ui: &mut egui::Ui, view: &mut DocView, frame: &mut PageFrame<'_>, i
 
     let slot = PageSlot { i, r, xf };
     let pcx = comments::PageCx { page: i, xf: &xf, ptr, info, tool, prefs, allowed, hidden: comments_hidden, redact_mark };
-    // A cancelled press takes nothing until the button is up, though the page's menu still opens
-    // where a right-click is.
-    let input = if view.press_cancelled {
+    // A cancelled press takes nothing until the button is up, and an image waiting to be placed
+    // takes the click itself (`image_place`), though the page's menu still opens where a
+    // right-click is.
+    let input = if view.press_cancelled || view.image_place.is_pending() {
         if let Some(p) = frame.right_click_on(xf.rect) {
             comments::anchor(&pcx, p, view);
         }
@@ -1600,6 +1646,21 @@ fn draw_page(ui: &mut egui::Ui, view: &mut DocView, frame: &mut PageFrame<'_>, i
     }
     text_layer(ui, view, frame, &slot, &input);
     page_overlays(ui, view, frame, &slot, &input);
+}
+
+/// How far, in points, a press may move before its release and still be a click.
+const CLICK_SLOP: f32 = 6.0;
+
+/// Where a click on the pages came up this frame: a press the pages hold and its release, close
+/// together. The press is remembered from its own frame, as egui has forgotten where it began by
+/// the frame of the release.
+fn image_place_click(view: &mut DocView, ptr: &PagePointer) -> Option<Pos2> {
+    if let Some(down) = ptr.pressed() {
+        view.image_place.note_press(down);
+    }
+    let up = ptr.released?;
+    let down = view.image_place.take_press().or(ptr.origin)?;
+    (down.distance(up) <= CLICK_SLOP).then_some(up)
 }
 
 #[allow(clippy::cognitive_complexity)]
@@ -1824,6 +1885,9 @@ fn draw_pages(
         let selected = view.prepare.selected.as_ref().map(|(name, _)| name.as_str());
         crate::calc_order_ui::paint_trace(ui, painter, visible, &view.calc_order, generation, selected);
     }
+    // An image waiting to be placed: its preview, its cursor, and the click that places it.
+    let click = image_place_click(view, &ptr);
+    image_place::after_pages(ui, view, info, pointer, click, unobstructed);
     // The pages' one cursor, from the claim on the highest layer the tool reaches, and the tip.
     let hover_text = pointer.filter(|_| unobstructed).zip(view.cursor.resolve(ui.ctx(), tool));
     // ScrollArea ignores the wheel while any widget is dragged, so a text-selection drag
@@ -1947,7 +2011,7 @@ fn draw_pages(
                 ui.close();
             }
             ui.separator();
-            if ui.add_enabled(can_modify, egui::Button::new(tl!("Remove all links"))).clicked() {
+            if crate::commands::offered("edit.remove_links") && ui.add_enabled(can_modify, egui::Button::new(tl!("Remove all links"))).clicked() {
                 view.pending_edit = Some(Edit::RemoveLinks { pages: None });
                 view.links.selected = None;
                 view.links.context = None;
@@ -2027,6 +2091,8 @@ fn draw_pages(
         let perms = PageMenuPerms {
             can_modify,
             can_assemble: doc.allows_assembly(),
+            // Deleting the clicked page: the one delete rule for one page of this document.
+            can_delete_page: DocView::pages_deletable(doc.allows_assembly(), &[0], doc.info.pages.len()),
             can_annotate: allowed,
             can_print: doc.allows_printing(),
             can_copy,
@@ -2770,6 +2836,15 @@ fn presentation_click_state(ui: &egui::Ui, view: &DocView, navigation_rect: Rect
     })
 }
 
+/// Whether the wheel, pinch zoom and the gestures that go with them are live this frame.
+/// On the desktop that is the window's focus. In a browser, egui reports `focused` only while the
+/// canvas has the keyboard focus, and a page that hosts the editor among other controls (Workspace)
+/// leaves it elsewhere, so the wheel over the pages would do nothing until they were clicked. There
+/// the pointer over the pages is enough, as it is for any other scrollable element of a page.
+fn navigation_has_focus(focused: bool, pointer_over_pages: bool, web: bool) -> bool {
+    focused || (web && pointer_over_pages)
+}
+
 /// Pinch / ctrl+scroll zoom, anchored on the pointer or the current page.
 fn pinch_zoom(ui: &egui::Ui, view: &mut DocView, zoom_delta: f32, navigation_rect: Rect, enabled: bool) {
     if zoom_delta.is_finite() && zoom_delta > 0.0 && zoom_delta != 1.0 && enabled && ui.rect_contains_pointer(navigation_rect) {
@@ -2911,6 +2986,9 @@ fn refine_goto_point(mut scroll: egui::ScrollArea, view: &mut DocView, geometry:
 /// scroll area with this frame's zoom, scrolling, tool input, overlays and render requests.
 pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
+    // An image the browser's chooser returned starts its placement here, on the document shown.
+    #[cfg(target_arch = "wasm32")]
+    app.take_picked_image();
     let can_paste_key = egui::Id::unique("can-paste-image");
     let can_paste_image = if ui.input(|i| i.pointer.secondary_pressed()) {
         let can = app.can_paste_image();
@@ -2995,7 +3073,8 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     let zoom_delta = crate::motion::zoom_delta(ui.ctx());
     // Exclude the previous frame's scrollbar tracks from gesture activation.
     let navigation_rect = if view.viewport_screen.is_positive() { avail.intersect(view.viewport_screen) } else { avail };
-    let navigation_enabled = app.dialog.is_none() && app.close_request.is_none() && !app.palette_open && ui.is_enabled() && ui.input(|i| i.focused);
+    let navigation_focus = navigation_has_focus(ui.input(|i| i.focused), ui.rect_contains_pointer(avail), cfg!(target_arch = "wasm32"));
+    let navigation_enabled = app.dialog.is_none() && app.close_request.is_none() && !app.palette_open && ui.is_enabled() && navigation_focus;
     let present = presentation_click_state(ui, view, navigation_rect, navigation_enabled && app.quick_tool == QuickTool::Select);
     pinch_zoom(ui, view, zoom_delta, navigation_rect, navigation_enabled);
     view.viewport_screen = avail;
@@ -3524,6 +3603,10 @@ fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, 
             app.dialog = Some(crate::Dialog::Properties(crate::PropsTab::Description));
         }
         None => {}
+    }
+    // The click that placed an image: one Add image edit, then the selection Add image leaves.
+    if let Some(placed) = app.views[index].image_place.take_placed() {
+        app.place_clicked_image(placed);
     }
     if let Some(why) = refused {
         app.notify_error(why);

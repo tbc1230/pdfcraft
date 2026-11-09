@@ -321,7 +321,7 @@ impl PdfCraftApp {
         }
         if activate && let Some(mode) = self.mode_override {
             // Explicit mode options do not reset independent --tool / --left choices.
-            self.mode = mode;
+            self.mode = crate::panels::offered_mode(mode);
         } else if activate && self.mode != self.default_mode {
             // Switch workspace like the mode bar, but a left panel the user (or `--left closed`)
             // closed stays closed, and an unchanged mode keeps the tool panel the user chose.

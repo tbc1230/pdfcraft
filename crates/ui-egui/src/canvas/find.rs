@@ -26,6 +26,11 @@ pub struct Find {
     pub whole_words: bool,
     /// Shown in the Search panel (Advanced Search) instead of the find bar.
     pub in_panel: bool,
+    /// The Search panel's row heights by match, as last drawn, and the width they were drawn at.
+    /// Rows scrolled out of view are not laid out; they take their remembered height. Cleared when
+    /// the matches change.
+    pub row_heights: Vec<f32>,
+    pub row_width: f32,
 }
 
 /// What a text layer arriving after a search began may do with the automatic choice.
@@ -85,6 +90,7 @@ impl DocView {
         let Some(f) = self.find.as_mut() else { return };
         f.case_query = f.query.clone();
         f.matches.clear();
+        f.row_heights.clear();
         f.current = None;
         // Refining the query keeps the page the reader started searching from, even when an
         // automatic choice has already scrolled them to a match. Only a view the reader moved
@@ -128,6 +134,7 @@ impl DocView {
         // this arrival must not pull them back; the choice then becomes theirs to keep.
         let follow = f.follow_page(self.current);
         f.matches.retain(|(p, _)| *p != page);
+        f.row_heights.clear();
         f.matches.extend(text.find_opts(&f.case_query, f.case_sensitive, f.whole_words).into_iter().map(|r| (page, r)));
         f.matches.sort_by_key(|(p, r)| (*p, r.start));
         if let Follow::Active(from) = follow {

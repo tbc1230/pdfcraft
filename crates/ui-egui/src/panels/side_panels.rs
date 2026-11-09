@@ -380,7 +380,10 @@ fn state_of(panels: &SidePanels, pane: Pane) -> PaneState {
 fn open_panes(app: &PdfCraftApp) -> Vec<Pane> {
     let mut open = Vec::new();
     // Read mode hides the tools, not the navigation panes.
-    if app.left_open && app.mode != Mode::Read {
+    // The web build shows no action with no document open: no Tools pane then either, because
+    // choosing a tool without a document asks for a file (fork change "interface-parts-hidden").
+    let tools_need_document = cfg!(target_arch = "wasm32");
+    if app.left_open && app.mode != Mode::Read && (app.active.is_some() || !tools_need_document) {
         open.push(Pane::Tools);
     }
     // Home and Combine files have no side panel; the choice is kept for the next document.
@@ -417,6 +420,21 @@ fn keep_resize_edges_off_scrollbars(ui: &mut egui::Ui, host: egui::Id, open: &[P
 
 /// Draws the rail and the open panes. Call after the top bars and before the central panel.
 pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
+    // The web build offers some of the side panels only (fork change "interface-parts-hidden").
+    // Whatever opened one it does not offer (a command, a notice, a restored choice) leaves it
+    // closed here, before the rail and the panes draw.
+    if app.right.is_some_and(|panel| !super::panel_offered(panel)) {
+        app.right = None;
+    }
+    if !super::panel_offered(app.last_right) {
+        app.last_right = crate::RightPanel::Comments;
+    }
+    // Nor is there an expanded All tools view: the central panel never gets to draw it.
+    // The web build is never in All tools (or Convert or E-Sign), whatever set the mode.
+    if cfg!(target_arch = "wasm32") {
+        app.all_tools_full = false;
+        app.mode = super::offered_mode(app.mode);
+    }
     if let Some(panel) = app.right {
         app.last_right = panel;
     }

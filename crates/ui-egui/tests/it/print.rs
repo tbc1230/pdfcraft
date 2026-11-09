@@ -913,3 +913,57 @@ fn a_booklet_decides_two_sided_itself() {
     assert!(h.query_by_role_and_label(Role::ComboBox, "Two-sided:").is_some());
     assert_eq!(h.state().print_draft.job("x").duplex, Some(Duplex::LongEdge), "back to the choice");
 }
+
+/// form.pdf with the print permission (bit 3) cleared.
+fn no_print_bytes() -> Vec<u8> {
+    let mut doc = pdfcraft_cos::Document::open(std::sync::Arc::new(include_bytes!("../data/form.pdf").to_vec())).unwrap();
+    doc.set_encryption(&pdfcraft_cos::NewEncryption {
+        algorithm: pdfcraft_cos::Algorithm::Aes256,
+        user_password: "",
+        owner_password: "owner",
+        permissions: -1 ^ 0b100,
+        encrypt_metadata: true,
+        seed: [3; 32],
+    })
+    .unwrap();
+    pdfcraft_cos::write_full(&doc, &Default::default()).unwrap()
+}
+
+/// The entry points that do not go through the command (the page menu, a form button, a script)
+/// are refused too, with the reason, and the dialog does not open.
+#[test]
+fn print_entry_points_outside_the_command_refuse_a_document_that_forbids_printing() {
+    let bytes = no_print_bytes();
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("restricted.pdf", None, bytes).unwrap();
+        app
+    });
+    h.run_steps(4);
+    h.state_mut().open_print();
+    h.run_steps(2);
+    assert_eq!(h.state().dialog, None);
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.as_str()), Some("The document's security settings don't allow printing"));
+    assert!(!h.state_mut().print_now());
+}
+
+/// Printing changes nothing in the document: `edit_generation` and `can_undo` are as before.
+#[test]
+fn printing_does_not_change_the_document() {
+    let mut h = harness();
+    let state = |h: &Harness<'static, PdfCraftApp>| {
+        let doc = h.state().session.get(h.state().views[0].id).unwrap();
+        (doc.edit_generation(), doc.can_undo().is_some(), doc.dirty)
+    };
+    let before = state(&h);
+    assert!(h.state_mut().execute("print.dialog"));
+    h.run_steps(3);
+    let out = std::env::temp_dir().join(format!("pdfcraft-print-unchanged-{}.pdf", std::process::id()));
+    h.state_mut().save_override = Some(out.to_string_lossy().into_owned());
+    h.state_mut().print_draft.printer = None;
+    assert!(h.state_mut().print_now());
+    h.run_steps(3);
+    assert_eq!(state(&h), before);
+    let _ = std::fs::remove_file(out);
+}

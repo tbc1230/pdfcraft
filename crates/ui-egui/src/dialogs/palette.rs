@@ -77,7 +77,7 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
             ));
         }
     }
-    for g in TOOL_GROUPS {
+    for g in TOOL_GROUPS.iter().filter(|g| crate::panels::tool_listed(g.id)) {
         if let Some(s) = score(tl!(g.label), &q).or_else(|| score(g.label, &q)) {
             hits.push((
                 s,
@@ -95,6 +95,11 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
             for i in sec.items {
                 if pdfcraft_engine::commands::command(i.command).is_some() {
                     continue; // listed above as a command
+                }
+                // A tool that is not a registry command yet (planned) runs nothing: the web build
+                // does not list it.
+                if !crate::commands::offered(i.command) {
+                    continue;
                 }
                 if let Some(s) = score(tl!(i.label), &q).or_else(|| score(i.label, &q)).or_else(|| score(i.command, &q).map(|s| s + 50)) {
                     hits.push((

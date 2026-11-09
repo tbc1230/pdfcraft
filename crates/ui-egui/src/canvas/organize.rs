@@ -32,6 +32,21 @@ impl DocView {
         if self.selected.is_empty() { vec![self.current] } else { self.selected.iter().copied().collect() }
     }
 
+    /// The one rule of deleting `pages` from a document of `count` pages: the permissions allow page
+    /// changes (`assembly`), at least one of the pages exists, and at least one page remains. A
+    /// selection that holds every page, and the current page of a one-page document, are refused.
+    pub(crate) fn pages_deletable(assembly: bool, pages: &[usize], count: usize) -> bool {
+        let distinct: std::collections::BTreeSet<usize> = pages.iter().copied().filter(|p| *p < count).collect();
+        assembly && !distinct.is_empty() && distinct.len() < count
+    }
+
+    /// Whether the pages an organize command acts on (see [`Self::target_pages`]) may be deleted:
+    /// the one rule of "Delete pages" for every surface (`commands.rs` `command_enabled`, the
+    /// Pages panel, the Organize grid and its panel, the keys).
+    pub(crate) fn can_delete_pages(&self, doc: &pdfcraft_engine::Document) -> bool {
+        Self::pages_deletable(doc.allows_assembly(), &self.target_pages(), doc.info.pages.len())
+    }
+
     pub fn select_pages(&mut self, pages: &[usize]) {
         self.selected = pages.iter().copied().filter(|p| *p < self.page_count).collect();
         if let Some(first) = self.selected.first() {
@@ -120,9 +135,12 @@ fn organize_toolbar(view: &mut DocView, info: &DocInfo, editable: bool, dirty: b
                     view.organize = false;
                 }
                 // What the grid shows is what is saved.
-                let save = ui.add_enabled_ui(dirty, |ui| widgets::pill_button(ui, tl!("Save pages"), true)).inner;
-                if save.on_hover_text(tl!("Save these pages as one PDF")).on_disabled_hover_text(tl!("No changes to save")).clicked() {
-                    view.pending_action = Some(ViewAction::Save);
+                // The web build offers no Save: Workspace saves with its own buttons.
+                if crate::commands::offered("file.save") {
+                    let save = ui.add_enabled_ui(dirty, |ui| widgets::pill_button(ui, tl!("Save pages"), true)).inner;
+                    if save.on_hover_text(tl!("Save these pages as one PDF")).on_disabled_hover_text(tl!("No changes to save")).clicked() {
+                        view.pending_action = Some(ViewAction::Save);
+                    }
                 }
                 ui.add_space(8.0);
                 // Page size in the grid (right to left: in, the percentage, out).
@@ -166,13 +184,13 @@ fn organize_toolbar(view: &mut DocView, info: &DocInfo, editable: bool, dirty: b
             let any = |f: &dyn Fn(&egui::Event) -> bool| i.events.iter().any(f);
             (any(&|e| matches!(e, egui::Event::Copy)), any(&|e| matches!(e, egui::Event::Cut)), any(&|e| matches!(e, egui::Event::Paste(_))))
         });
-        if copy || cut {
+        if (copy && crate::commands::offered("page.copy")) || (cut && crate::commands::offered("page.cut")) {
             view.pending_action = Some(ViewAction::CopyPages { cut });
         }
-        if paste {
+        if paste && crate::commands::offered("page.paste") {
             view.pending_action = Some(ViewAction::PastePages);
         }
-        if del && targets.len() < n {
+        if del && DocView::pages_deletable(editable, &targets, n) && crate::commands::offered("page.delete") {
             view.pending_edit = Some(Edit::DeletePages { pages: targets });
         }
         if esc {
@@ -394,16 +412,25 @@ pub(super) fn organize_grid(
                         |ui| {
                             ui.spacing_mut().item_spacing.x = 3.0;
                             ui.add_enabled_ui(editable, |ui| {
-                                for (icon, degrees, key) in
-                                    [("rotate-ccw", -90, "Rotate page {label} counterclockwise"), ("rotate-cw", 90, "Rotate page {label} clockwise")]
-                                {
+                                // The buttons that run a registry command are drawn only where the build
+                                // offers it (the web build: fork change "interface-parts-hidden").
+                                for (icon, degrees, key, command) in [
+                                    ("rotate-ccw", -90, "Rotate page {label} counterclockwise", "page.rotate_ccw"),
+                                    ("rotate-cw", 90, "Rotate page {label} clockwise", "page.rotate"),
+                                ] {
+                                    if !crate::commands::offered(command) {
+                                        continue;
+                                    }
                                     let label = crate::i18n::fmt(tl!(key), &[("label", &p.label)]);
                                     if icons::button(ui, icon, 26.0, false, &label).clicked() {
                                         view.pending_edit = Some(Edit::RotatePages { pages: vec![i], degrees });
                                     }
                                 }
                                 let label = crate::i18n::fmt(tl!("Delete page {label}"), &[("label", &p.label)]);
-                                if ui.add_enabled_ui(info.pages.len() > 1, |ui| icons::button(ui, "trash-2", 26.0, false, &label)).inner.clicked() {
+                                let may_delete = DocView::pages_deletable(editable, &[i], info.pages.len());
+                                if crate::commands::offered("page.delete")
+                                    && ui.add_enabled_ui(may_delete, |ui| icons::button(ui, "trash-2", 26.0, false, &label)).inner.clicked()
+                                {
                                     view.pending_edit = Some(Edit::DeletePages { pages: vec![i] });
                                 }
                             });
@@ -424,28 +451,30 @@ pub(super) fn organize_grid(
                         view.selected = [i].into();
                         view.go_to_page(i);
                     }
-                    if ui.button(tl!("Extract pages")).clicked() {
+                    // Each entry runs a registry command: it is drawn only where the build offers it.
+                    let offered = crate::commands::offered;
+                    if offered("page.extract") && ui.button(tl!("Extract pages")).clicked() {
                         view.pending_action = Some(ViewAction::Extract);
                         ui.close();
                     }
-                    if ui.button(tl!("Split document…")).clicked() {
+                    if offered("page.split") && ui.button(tl!("Split document…")).clicked() {
                         view.pending_action = Some(ViewAction::SplitBeforeSelected);
                         ui.close();
                     }
-                    if ui.add_enabled(editable, egui::Button::new(tl!("Replace pages…"))).clicked() {
+                    if offered("page.replace") && ui.add_enabled(editable, egui::Button::new(tl!("Replace pages…"))).clicked() {
                         view.pending_action = Some(ViewAction::ReplacePages);
                         ui.close();
                     }
                     ui.separator();
-                    if ui.add_enabled(editable, egui::Button::new(tl!("Cut"))).clicked() {
+                    if offered("page.cut") && ui.add_enabled(editable, egui::Button::new(tl!("Cut"))).clicked() {
                         view.pending_action = Some(ViewAction::CopyPages { cut: true });
                         ui.close();
                     }
-                    if ui.button(tl!("Copy")).clicked() {
+                    if offered("page.copy") && ui.button(tl!("Copy")).clicked() {
                         view.pending_action = Some(ViewAction::CopyPages { cut: false });
                         ui.close();
                     }
-                    if ui.add_enabled(editable, egui::Button::new(tl!("Paste after"))).clicked() {
+                    if offered("page.paste") && ui.add_enabled(editable, egui::Button::new(tl!("Paste after"))).clicked() {
                         view.pending_action = Some(ViewAction::PastePages);
                         ui.close();
                     }
@@ -453,7 +482,7 @@ pub(super) fn organize_grid(
             }
         }
         // Between pages (and at both ends): insert files right there.
-        if editable && !middle_gesture && view.org_drag.is_none() {
+        if editable && crate::commands::offered("page.insert") && !middle_gesture && view.org_drag.is_none() {
             let mid = |r: &Rect| r.top() + 16.0 + (cell.y - 88.0) / 2.0;
             for (i, c) in &cells {
                 let label = info
@@ -504,7 +533,7 @@ pub(super) fn organize_grid(
             if drop {
                 view.org_drag = None;
                 if let Some(gap) = drop_gap(&cells, p) {
-                    if copying {
+                    if copying && crate::commands::offered("page.duplicate") {
                         // The copies land at the gap as it is: nothing leaves its place.
                         view.pending_edit = Some(Edit::DuplicatePages { pages: pages.clone(), at: Some(gap) });
                         view.selected = (gap..gap + pages.len()).collect();

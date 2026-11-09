@@ -10,6 +10,33 @@ use pdfcraft_engine::{DocId, Edit, SplitBy};
 
 use crate::PdfCraftApp;
 
+/// Why [`PdfCraftApp::insert_pages_from_bytes`] inserted nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InsertFromBytesError {
+    /// The PDF is encrypted and the password given is missing or wrong.
+    PasswordRequired,
+    /// Any other failure, with the editor's own text.
+    Failed(String),
+}
+
+/// The name an inserted PDF gets when the host gives none, as the host open does.
+const DEFAULT_INSERTED_NAME: &str = "document.pdf";
+
+/// The failure of an Insert pages edit as [`InsertFromBytesError`]: the password is needed when
+/// the engine said the given one is wrong, or when the file is a source that wants one.
+fn insert_error(error: pdfcraft_engine::EditError, bytes: &Arc<Vec<u8>>, password: Option<&str>) -> InsertFromBytesError {
+    use pdfcraft_engine::{EditError, SourceProblem};
+    match error {
+        EditError::WrongPassword => InsertFromBytesError::PasswordRequired,
+        EditError::Source(_)
+            if matches!(pdfcraft_engine::combine_source_check(bytes, password), Err(SourceProblem::Password | SourceProblem::WrongPassword)) =>
+        {
+            InsertFromBytesError::PasswordRequired
+        }
+        other => InsertFromBytesError::Failed(other.to_string()),
+    }
+}
+
 /// Why files were picked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilePurpose {
@@ -610,6 +637,38 @@ impl PdfCraftApp {
         self.insert_files(vec![(name.to_string(), bytes)]);
     }
 
+    /// Insert all pages of the PDF `bytes` after the last selected page of the active document (the
+    /// current page when none is selected), as one undo step, and select them; returns how many
+    /// were inserted. `password` (user or owner) opens `bytes` when they are encrypted, and is
+    /// used for nothing else. `name` is the file's name, as on the picker path: the undo step's
+    /// label, the title (without its extension) of the one new bookmark that holds the file's
+    /// bookmarks, and error texts; blank, it is `document.pdf`. For the host functions: no file chooser, dialog or toast. A
+    /// failure leaves the document unchanged and says why: [`InsertFromBytesError::PasswordRequired`]
+    /// when `bytes` need a password and `password` is missing or wrong, else
+    /// [`InsertFromBytesError::Failed`] with the editor's text (bytes that are not a PDF, a
+    /// document whose permissions forbid assembly, no open document).
+    pub fn insert_pages_from_bytes(&mut self, name: String, bytes: Vec<u8>, password: Option<String>) -> Result<usize, InsertFromBytesError> {
+        let Some((i, id)) = self.active_ids() else { return Err(InsertFromBytesError::Failed("no document is open".into())) };
+        let before = self.session.get(id).map_or(0, |d| d.info.pages.len());
+        let start = self.views[i].target_pages().last().map_or(0, |p| p.saturating_add(1)).min(before);
+        let bytes = Arc::new(bytes);
+        let edit = Edit::InsertPagesFrom {
+            name: if name.trim().is_empty() { DEFAULT_INSERTED_NAME.into() } else { name },
+            bytes: bytes.clone(),
+            pages: None,
+            at: start,
+            field_conflicts: pdfcraft_engine::FieldConflicts::Rename,
+            password: password.as_deref().map(pdfcraft_engine::SourcePassword::new),
+        };
+        self.apply_edit_quiet(edit).map_err(|e| insert_error(e, &bytes, password.as_deref()))?;
+        let after = self.session.get(id).map_or(before, |d| d.info.pages.len());
+        let inserted = after.saturating_sub(before);
+        if let Some(view) = self.views.get_mut(i) {
+            view.select_pages(&(start..start.saturating_add(inserted)).collect::<Vec<_>>());
+        }
+        Ok(inserted)
+    }
+
     /// Insert the pages of `files` (PDFs, images, text), in order, at the gap a "+" in the page
     /// grid chose, or else after the selection (or the current page); then select them.
     pub fn insert_files(&mut self, files: Vec<(String, Vec<u8>)>) {
@@ -646,6 +705,7 @@ impl PdfCraftApp {
                         pages: None,
                         at,
                         field_conflicts: pdfcraft_engine::FieldConflicts::Rename,
+                        password: None,
                     }) {
                         at = at.saturating_add(pages);
                     }
@@ -1233,5 +1293,169 @@ mod font_scan_tests {
     #[test]
     fn a_panicking_font_scan_finishes_with_an_empty_list() {
         assert!(super::discover_fonts_safely(|| panic!("synthetic font scan failure")).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod insert_bytes_tests {
+    use super::InsertFromBytesError;
+    use crate::PdfCraftApp;
+    use pdfcraft_engine::Session;
+
+    fn blank(pages: usize) -> Vec<u8> {
+        Session::new().create_blank(595.0, 842.0, pages).unwrap().to_vec()
+    }
+
+    fn app_with_pages(pages: usize) -> PdfCraftApp {
+        let mut app = PdfCraftApp::new();
+        app.open_bytes("doc.pdf", None, blank(pages)).unwrap();
+        app
+    }
+
+    /// One page, open password `pw`, owner password `owner`.
+    fn locked() -> Vec<u8> {
+        let mut app = app_with_pages(1);
+        assert!(app.apply_edit(pdfcraft_engine::Edit::Protect(pdfcraft_engine::Protection {
+            open_password: Some("pw".into()),
+            permissions_password: Some("owner".into()),
+            ..Default::default()
+        })));
+        app.session.save_bytes(app.views[0].id).unwrap().to_vec()
+    }
+
+    fn generation(app: &PdfCraftApp) -> u64 {
+        app.session.get(app.views[0].id).unwrap().edit_generation()
+    }
+
+    fn pages(app: &PdfCraftApp) -> usize {
+        app.session.get(app.views[0].id).unwrap().info.pages.len()
+    }
+
+    #[test]
+    fn with_no_document_it_fails_saying_so() {
+        let mut app = PdfCraftApp::new();
+        assert_eq!(app.insert_pages_from_bytes("b.pdf".into(), blank(1), None), Err(InsertFromBytesError::Failed("no document is open".into())));
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn it_inserts_after_the_current_page_selects_them_and_is_one_undo_step() {
+        let mut app = app_with_pages(3);
+        app.views[0].current = 0;
+        assert_eq!(app.insert_pages_from_bytes("b.pdf".into(), blank(2), None), Ok(2));
+        assert_eq!(pages(&app), 5);
+        assert_eq!(app.views[0].selected.iter().copied().collect::<Vec<_>>(), [1, 2], "inserted after the current page, and selected");
+        assert!(app.toast.is_none() && app.dialog.is_none(), "no toast and no dialog");
+        assert!(app.execute("edit.undo"));
+        assert_eq!(pages(&app), 3, "one undo step takes them all back");
+    }
+
+    #[test]
+    fn it_inserts_after_the_last_selected_page() {
+        let mut app = app_with_pages(4);
+        app.views[0].select_pages(&[0, 2]);
+        assert_eq!(app.insert_pages_from_bytes("b.pdf".into(), blank(1), None), Ok(1));
+        assert_eq!(pages(&app), 5);
+        assert_eq!(app.views[0].selected.iter().copied().collect::<Vec<_>>(), [3]);
+    }
+
+    #[test]
+    fn the_open_documents_information_stays_its_own() {
+        let mut app = app_with_pages(1);
+        let id = app.views[0].id;
+        assert!(app.apply_edit(pdfcraft_engine::Edit::SetInfo { key: "Title".into(), value: "Mine".into() }));
+        let mut other = Session::new();
+        let oid = other.open("o.pdf", None, std::sync::Arc::new(blank(1)), None).unwrap();
+        other.apply(oid, pdfcraft_engine::Edit::SetInfo { key: "Title".into(), value: "Theirs".into() }).unwrap();
+        let bytes = other.save_bytes(oid).unwrap().to_vec();
+        assert_eq!(app.insert_pages_from_bytes("b.pdf".into(), bytes, None), Ok(1));
+        assert_eq!(app.session.get(id).unwrap().info_value("Title").as_deref(), Some("Mine"));
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_pdf_fail_and_change_nothing() {
+        let mut app = app_with_pages(2);
+        let before = generation(&app);
+        for bytes in [Vec::new(), b"not a pdf".to_vec(), (0..=255u8).cycle().take(2048).collect::<Vec<u8>>()] {
+            let result = app.insert_pages_from_bytes("b.pdf".into(), bytes, None);
+            let Err(InsertFromBytesError::Failed(text)) = result else { panic!("expected a failure") };
+            assert!(text.starts_with("couldn't use"), "{text}");
+            assert_eq!(pages(&app), 2);
+            assert_eq!(generation(&app), before);
+            assert!(app.session.get(app.views[0].id).unwrap().can_undo().is_none());
+            assert!(app.toast.is_none());
+        }
+    }
+
+    #[test]
+    fn a_locked_pdf_needs_its_password() {
+        let mut app = app_with_pages(2);
+        let before = generation(&app);
+        assert_eq!(app.insert_pages_from_bytes("b.pdf".into(), locked(), None), Err(InsertFromBytesError::PasswordRequired));
+        assert_eq!(app.insert_pages_from_bytes("b.pdf".into(), locked(), Some("wrong".into())), Err(InsertFromBytesError::PasswordRequired));
+        assert_eq!((pages(&app), generation(&app)), (2, before));
+        assert_eq!(app.insert_pages_from_bytes("b.pdf".into(), locked(), Some("owner".into())), Ok(1));
+        assert_eq!(pages(&app), 3);
+        // The password is not in the undo step's label.
+        let label = app.session.get(app.views[0].id).unwrap().can_undo().unwrap().to_string();
+        assert!(!label.contains("owner"), "{label}");
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn a_document_that_forbids_assembly_refuses_with_the_reason() {
+        let mut protected = app_with_pages(2);
+        assert!(protected.apply_edit(pdfcraft_engine::Edit::Protect(pdfcraft_engine::Protection {
+            permissions_password: Some("owner".into()),
+            ..Default::default()
+        })));
+        let bytes = protected.session.save_bytes(protected.views[0].id).unwrap().to_vec();
+        let mut app = PdfCraftApp::new();
+        app.open_bytes("restricted.pdf", None, bytes).unwrap();
+        let before = generation(&app);
+        let result = app.insert_pages_from_bytes("b.pdf".into(), blank(1), None);
+        let Err(InsertFromBytesError::Failed(text)) = result else { panic!("expected a failure") };
+        assert!(text.contains("security settings"), "{text}");
+        assert_eq!((pages(&app), generation(&app)), (2, before));
+        assert!(app.toast.is_none());
+    }
+
+    fn with_bookmarks() -> Vec<u8> {
+        let mut other = app_with_pages(2);
+        let bookmark = pdfcraft_engine::Edit::AddBookmark { parent: vec![], index: 0, title: "Intro".into(), page: 0, left: None, top: None };
+        assert!(other.apply_edit(bookmark));
+        other.session.save_bytes(other.views[0].id).unwrap().to_vec()
+    }
+
+    fn outline(app: &PdfCraftApp) -> Vec<(String, Vec<String>)> {
+        let doc = app.session.get(app.views[0].id).unwrap();
+        doc.info.outline.iter().map(|o| (o.title.clone(), o.children.iter().map(|c| c.title.clone()).collect())).collect()
+    }
+
+    #[test]
+    fn the_inserted_files_bookmarks_come_under_one_bookmark_named_after_it() {
+        let mut app = app_with_pages(1);
+        assert_eq!(app.insert_pages_from_bytes("Report.pdf".into(), with_bookmarks(), None), Ok(2));
+        assert_eq!(outline(&app), [("Report".to_string(), vec!["Intro".to_string()])]);
+        let label = app.session.get(app.views[0].id).unwrap().can_undo().unwrap().to_string();
+        assert_eq!(label, "Insert pages from Report.pdf");
+    }
+
+    #[test]
+    fn a_file_with_no_bookmarks_adds_none() {
+        let mut app = app_with_pages(1);
+        assert_eq!(app.insert_pages_from_bytes("Plain.pdf".into(), blank(2), None), Ok(2));
+        assert!(outline(&app).is_empty(), "{:?}", outline(&app));
+    }
+
+    #[test]
+    fn a_blank_name_is_document_pdf() {
+        let mut app = app_with_pages(1);
+        assert_eq!(app.insert_pages_from_bytes("  ".into(), blank(1), None), Ok(1));
+        let label = app.session.get(app.views[0].id).unwrap().can_undo().unwrap().to_string();
+        assert_eq!(label, "Insert pages from document.pdf");
+        let result = app.insert_pages_from_bytes(String::new(), b"x".to_vec(), None);
+        let Err(InsertFromBytesError::Failed(text)) = result else { panic!("expected a failure") };
+        assert!(text.starts_with("couldn't use document.pdf"), "{text}");
     }
 }

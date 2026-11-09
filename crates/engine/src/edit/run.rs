@@ -3,8 +3,50 @@ use super::{
     image_content_type, is_xfa_data_file, js, mark_source, measure, model_poster, open_source, strip_xfa, unrestricted, xfa, xfa_after_data_change,
 };
 use crate::SourceProblem;
-use crate::sources::{comment_source, import_pdf_comments};
+use crate::sources::{comment_source, import_pdf_comments, open_source_with};
 use pdfcraft_content::Matrix;
+
+/// Open the PDF of an Insert pages edit, with `password` (user or owner) when it is encrypted. A
+/// file that needs a password is told from every other failure: given a wrong one the error is
+/// [`EditError::WrongPassword`]; given none it is an [`EditError::Source`] whose [`SourceProblem`]
+/// (what [`crate::combine_source_check`] returns for the same bytes and password) is
+/// `Password`. The password is in none of their texts.
+fn open_inserted(name: &str, bytes: &Arc<Vec<u8>>, password: Option<&str>) -> Result<pdfcraft_cos::Document, EditError> {
+    let opened = open_source_with(name, bytes, password);
+    if opened.is_err() && matches!(crate::combine_source_check(bytes, password), Err(SourceProblem::WrongPassword)) {
+        return Err(EditError::WrongPassword);
+    }
+    opened
+}
+
+/// The natural size, in points, of the image `bytes` (named `name`) that an Add image edit
+/// places: its pixels at its own resolution (72 dpi when it has none), exactly the size the
+/// edit embeds it with. The image is decoded as the edit decodes it, so bytes that are not a
+/// placeable image, are empty or are over the engine's limits fail with the engine's text.
+pub fn added_image_natural_size(name: &str, bytes: &[u8]) -> Result<(f64, f64), EditError> {
+    // The image goes into a scratch document that is dropped: the same embedding, so the same size.
+    let sized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut scratch = pdfcraft_cos::Document::new_empty();
+        embed_image(&mut scratch, name, bytes).map(|(_, natural)| natural)
+    }));
+    match sized {
+        Ok(Ok(natural)) => Ok(natural),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => Err(EditError::Source(format!("{name}: the image could not be read"))),
+    }
+}
+
+/// The size an image of `natural` size is placed at on a page of `page` size when no box is
+/// given: capped to 80 percent of the page on each side, keeping its shape, and never enlarged.
+/// A size that is not finite and positive is returned as it is.
+pub fn fit_added_image(natural: (f64, f64), page: (f64, f64)) -> (f64, f64) {
+    let usable = |v: f64| v.is_finite() && v > 0.0;
+    if !(usable(natural.0) && usable(natural.1) && usable(page.0) && usable(page.1)) {
+        return natural;
+    }
+    let k = ((page.0 * 0.8) / natural.0).min((page.1 * 0.8) / natural.1).min(1.0);
+    (natural.0 * k, natural.1 * k)
+}
 
 /// Whether the opening password allows an edit (§7.6.4.2, Table 22).
 pub(crate) fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), EditError> {
@@ -439,8 +481,8 @@ pub(crate) fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut E
         }
         Edit::SetPageBox { pages, which, spec } => pdfcraft_organize::set_page_box(doc, pages, *which, *spec)?,
         Edit::SetTransition { pages, spec } => pdfcraft_organize::set_transition(doc, pages, spec)?,
-        Edit::InsertPagesFrom { name, bytes, pages, at, field_conflicts } => {
-            let src = open_source(name, bytes)?;
+        Edit::InsertPagesFrom { name, bytes, pages, at, field_conflicts, password } => {
+            let src = open_inserted(name, bytes, password.as_ref().map(|p| p.as_str()))?;
             let pages = match pages {
                 Some(p) => p.clone(),
                 None => (0..pdfcraft_organize::page_count(&src)?).collect(),
@@ -770,8 +812,7 @@ pub(crate) fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut E
                 None => {
                     let p = pdfcraft_model::pages(doc).swap_remove(*page);
                     let (pw, ph) = p.display_size(doc);
-                    let k = ((pw * 0.8) / natural.0).min((ph * 0.8) / natural.1).min(1.0);
-                    let (w, h) = (natural.0 * k, natural.1 * k);
+                    let (w, h) = fit_added_image(natural, (pw, ph));
                     [(pw - w) / 2.0, (ph - h) / 2.0, (pw + w) / 2.0, (ph + h) / 2.0]
                 }
             };

@@ -12,11 +12,16 @@ use super::{
 pub(crate) fn attachment_items(ui: &mut egui::Ui, view: &mut DocView, info: &DocInfo, a: &Annotation) {
     let source = pdfcraft_render::AttachmentSource::Annotation { page: a.page, index: a.index };
     let Some(file) = info.attachments.iter().find(|f| f.source == source) else { return };
+    // The web build offers only what its command list allows, and has no tab to open a file in
+    // (fork change "interface-parts-hidden").
+    if !crate::commands::offered("comment.attach") {
+        return;
+    }
     if ui.button(tl!("Save attachment…")).clicked() {
         view.comments.attachment_request = Some((a.page, a.index, false));
         ui.close();
     }
-    if file.name.to_lowercase().ends_with(".pdf") && ui.button(tl!("Open in a new tab")).clicked() {
+    if cfg!(not(target_arch = "wasm32")) && file.name.to_lowercase().ends_with(".pdf") && ui.button(tl!("Open in a new tab")).clicked() {
         view.comments.attachment_request = Some((a.page, a.index, true));
         ui.close();
     }
@@ -131,12 +136,16 @@ pub(crate) fn context_menu(
             ui.separator();
             // The comments themselves, to paste into this or another document (⌘C / ⌘V too).
             let copy_key = crate::commands::shortcut_label(ui.ctx(), crate::commands::COPY);
-            if ui.add(egui::Button::new(tl!(if several > 0 { "Copy comments" } else { "Copy comment" })).shortcut_text(copy_key)).clicked() {
+            if crate::commands::offered("comment.copy")
+                && ui.add(egui::Button::new(tl!(if several > 0 { "Copy comments" } else { "Copy comment" })).shortcut_text(copy_key)).clicked()
+            {
                 view.comments.copy_request = true;
                 ui.close();
             }
             let paste_key = crate::commands::shortcut_label(ui.ctx(), crate::commands::PASTE);
-            if ui.add_enabled(allowed && can_paste, egui::Button::new(tl!("Paste comments")).shortcut_text(paste_key)).clicked() {
+            if crate::commands::offered("comment.paste")
+                && ui.add_enabled(allowed && can_paste, egui::Button::new(tl!("Paste comments")).shortcut_text(paste_key)).clicked()
+            {
                 let at = view.comments.context_at.unwrap_or((page, [f64::from(a.rect[0]), f64::from(a.rect[1])]));
                 view.comments.paste_request = Some(at);
                 ui.close();
@@ -160,12 +169,13 @@ pub(crate) fn context_menu(
         }
         None => {
             if let Some((page, at)) = view.comments.context_at
+                && crate::commands::offered("comment.note")
                 && ui.add_enabled(allowed, egui::Button::new(tl!("Add a sticky note here"))).clicked()
             {
                 view.comments.composer = Some(Composer { page, at, kind: ComposerKind::Note, text: String::new(), focus: true });
                 ui.close();
             }
-            if ui.button(tl!("Comments panel")).clicked() {
+            if crate::commands::offered("comment.list") && ui.button(tl!("Comments panel")).clicked() {
                 action = Some(CanvasAction::OpenComments);
                 ui.close();
             }
@@ -173,7 +183,7 @@ pub(crate) fn context_menu(
     }
     // Every comment of the document into its pages, as Comment ▸ Flatten comments does: signed
     // or reviewed pages whose comments should no longer move.
-    if !info.annotations.is_empty() {
+    if !info.annotations.is_empty() && crate::commands::offered("comment.flatten") {
         ui.separator();
         if ui.add_enabled(can_modify, egui::Button::new(tl!("Flatten comments"))).clicked() {
             view.comments.selected = None;

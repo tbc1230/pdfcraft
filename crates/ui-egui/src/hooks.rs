@@ -1,6 +1,15 @@
 /// Files delivered asynchronously: (name, bytes).
 pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 
+/// An author name the embedding page set (web), waiting to be taken by the app on its next frame.
+pub type AuthorInbox = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+
+/// An interface language the embedding page set (web), a canonical `language` preference value waiting to be taken by the app on its next frame.
+pub type LanguageInbox = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+
+/// A theme choice the embedding page set (web), waiting to be taken by the app on its next frame.
+pub type ThemeInbox = std::sync::Arc<std::sync::Mutex<Option<crate::theme::ThemePreference>>>;
+
 /// Files that failed to arrive asynchronously (a browser `?file=` URL that couldn't be fetched):
 /// `(name, error)`, reported to the user on the next frame (#173).
 pub type FailedInbox = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;

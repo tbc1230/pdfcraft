@@ -34,6 +34,8 @@ fn command_params(params: Value) -> Value {
 
 #[cfg(target_arch = "wasm32")]
 pub use web::install;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use web::poll_reply;
 
 #[cfg(target_arch = "wasm32")]
 mod web {
@@ -77,14 +79,23 @@ mod web {
         }
     }
 
-    /// The app's reply, polled about once a frame.
-    async fn wait(reply: Receiver<Reply>) -> Value {
+    /// The app's reply, polled about once a frame; `None` when the app dropped the request.
+    /// Also used by `host_api` for its calls.
+    pub(crate) async fn poll_reply<T>(reply: Receiver<T>) -> Option<T> {
         loop {
             match reply.try_recv() {
-                Ok(reply) => return reply_object(reply),
+                Ok(reply) => return Some(reply),
                 Err(TryRecvError::Empty) => sleep(POLL_MS).await,
-                Err(TryRecvError::Disconnected) => return json!({"ok": false, "error": "the app dropped the request"}),
+                Err(TryRecvError::Disconnected) => return None,
             }
+        }
+    }
+
+    /// The app's reply to a control request, as the protocol's reply object.
+    async fn wait(reply: Receiver<Reply>) -> Value {
+        match poll_reply(reply).await {
+            Some(reply) => reply_object(reply),
+            None => json!({"ok": false, "error": "the app dropped the request"}),
         }
     }
 

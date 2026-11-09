@@ -1510,3 +1510,312 @@ fn rail_page_and_zoom_fields_match_and_fit_the_rail() {
         assert!((r.center().x - rail.center().x).abs() < 1.0, "{r:?} is off the rail's centre ({rail:?})");
     }
 }
+
+/// An RGB PNG of `w` x `h` pixels, with no resolution (72 dpi: one point per pixel).
+fn flat_png(w: u32, h: u32) -> Vec<u8> {
+    let mut png = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut png, w, h);
+        enc.set_color(png::ColorType::Rgb);
+        let mut writer = enc.write_header().unwrap();
+        writer.write_image_data(&vec![90u8; (w * h * 3) as usize]).unwrap();
+    }
+    png
+}
+
+/// A 3 x 2 pixel 24-bit BMP of one red colour (72 dpi is assumed: one point per pixel).
+fn red_bmp() -> Vec<u8> {
+    let (w, h, row) = (3u32, 2u32, 12u32); // rows are padded to a multiple of four bytes
+    let mut bmp = b"BM".to_vec();
+    bmp.extend_from_slice(&(54 + row * h).to_le_bytes());
+    bmp.extend_from_slice(&[0; 4]);
+    bmp.extend_from_slice(&54u32.to_le_bytes());
+    bmp.extend_from_slice(&40u32.to_le_bytes());
+    bmp.extend_from_slice(&w.to_le_bytes());
+    bmp.extend_from_slice(&h.to_le_bytes());
+    bmp.extend_from_slice(&1u16.to_le_bytes());
+    bmp.extend_from_slice(&24u16.to_le_bytes());
+    bmp.extend_from_slice(&[0; 4]); // no compression
+    bmp.extend_from_slice(&(row * h).to_le_bytes());
+    bmp.extend_from_slice(&[0; 16]); // resolution and colour counts: none
+    for _ in 0..h {
+        for _ in 0..w {
+            bmp.extend_from_slice(&[0, 0, 255]); // blue, green, red
+        }
+        bmp.extend_from_slice(&[0; 3]);
+    }
+    bmp
+}
+
+/// A 2 x 1 pixel GIF: a red and a blue pixel (a 2 colour table, minimum LZW code size 2).
+fn two_pixel_gif() -> Vec<u8> {
+    let mut gif = b"GIF89a".to_vec();
+    gif.extend_from_slice(&[2, 0, 1, 0, 0x80, 0, 0]); // 2 x 1, a global table of 2 colours
+    gif.extend_from_slice(&[255, 0, 0, 0, 0, 255]);
+    gif.extend_from_slice(&[0x2C, 0, 0, 0, 0, 2, 0, 1, 0, 0]); // image descriptor
+    // LZW, 3 bit codes, least significant bit first: clear (4), pixel 0, pixel 1, end (5).
+    gif.extend_from_slice(&[2, 2, 0x44, 0x0A, 0, 0x3B]);
+    gif
+}
+
+/// A 4 x 2 pixel 8-bit grey TIFF, uncompressed, one strip, no resolution (72 dpi).
+fn grey_tiff() -> Vec<u8> {
+    let entry = |tag: u16, kind: u16, value: u32| {
+        let mut e = Vec::new();
+        e.extend_from_slice(&tag.to_le_bytes());
+        e.extend_from_slice(&kind.to_le_bytes());
+        e.extend_from_slice(&1u32.to_le_bytes());
+        e.extend_from_slice(&value.to_le_bytes());
+        e
+    };
+    let (short, long) = (3u16, 4u16);
+    let entries = [
+        (256, short, 4),
+        (257, short, 2),
+        (258, short, 8),
+        (259, short, 1),
+        (262, short, 1),
+        (273, long, 122),
+        (277, short, 1),
+        (278, short, 2),
+        (279, long, 8),
+    ];
+    let mut tiff = b"II*\0".to_vec();
+    tiff.extend_from_slice(&8u32.to_le_bytes());
+    tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for (tag, kind, value) in entries {
+        tiff.extend_from_slice(&entry(tag, kind, value));
+    }
+    tiff.extend_from_slice(&[0; 4]); // no next image
+    tiff.extend_from_slice(&[40, 80, 120, 160, 200, 220, 240, 255]);
+    tiff
+}
+
+/// A 2 x 2 pixel 24-bit PCX at 72 dpi: each scanline holds a red, a green and a blue row.
+fn small_pcx() -> Vec<u8> {
+    let mut pcx = vec![0u8; 128];
+    pcx[..4].copy_from_slice(&[0x0A, 5, 1, 8]);
+    pcx[8..10].copy_from_slice(&1u16.to_le_bytes());
+    pcx[10..12].copy_from_slice(&1u16.to_le_bytes());
+    pcx[12..14].copy_from_slice(&72u16.to_le_bytes());
+    pcx[14..16].copy_from_slice(&72u16.to_le_bytes());
+    pcx[65] = 3;
+    pcx[66..68].copy_from_slice(&2u16.to_le_bytes());
+    pcx.extend_from_slice(&[10, 11, 20, 21, 30, 31]);
+    pcx.extend_from_slice(&[40, 41, 50, 51, 60, 61]);
+    pcx
+}
+
+/// A 4 x 4 pixel, three component JPEG 2000 codestream (raw, no JP2 box): one tile, no wavelet
+/// levels, one empty packet per component, so every sample is the midpoint 128 (mid grey).
+fn grey_j2k() -> Vec<u8> {
+    let components = 3u16;
+    let mut c = vec![0xff, 0x4f, 0xff, 0x51]; // SOC, SIZ
+    c.extend_from_slice(&(38 + 3 * components).to_be_bytes());
+    c.extend_from_slice(&0u16.to_be_bytes()); // Rsiz
+    for value in [4u32, 4, 0, 0, 4, 4, 0, 0] {
+        c.extend_from_slice(&value.to_be_bytes());
+    }
+    c.extend_from_slice(&components.to_be_bytes());
+    for _ in 0..components {
+        c.extend_from_slice(&[7, 1, 1]); // eight bits, no subsampling
+    }
+    c.extend_from_slice(&[0xff, 0x52, 0, 12, 0, 0, 0, 1, 0, 0, 4, 4, 0, 1]); // COD
+    c.extend_from_slice(&[0xff, 0x5c, 0, 4, 0x40, 0x40]); // QCD
+    c.extend_from_slice(&[0xff, 0x90, 0, 10, 0, 0]); // SOT, tile zero
+    c.extend_from_slice(&(14 + u32::from(components)).to_be_bytes());
+    c.extend_from_slice(&[0, 1, 0xff, 0x93]); // one tile part, SOD
+    c.extend(std::iter::repeat_n(0, usize::from(components)));
+    c.extend_from_slice(&[0xff, 0xd9]); // EOC
+    c
+}
+
+/// Starting the placement of `bytes` (a picture of `w` x `h` points) leaves a preview picture of
+/// the same shape with something drawn in it, not just a frame.
+fn assert_preview_picture(name: &str, bytes: Vec<u8>, (w, h): (f64, f64)) {
+    let _gpu = gpu();
+    let mut harness = harness();
+    harness.state_mut().start_image_placement(name.into(), bytes).unwrap();
+    let preview = harness.state().image_placement_preview().unwrap_or_else(|| panic!("{name}: no preview picture"));
+    let [pw, ph] = preview.size;
+    assert!(pw > 0 && ph > 0 && preview.pixels.len() == pw * ph, "{name}: {pw} x {ph} pixels, {} stored", preview.pixels.len());
+    assert!((pw as f64 / ph as f64 - w / h).abs() < 0.02 * w / h, "{name}: {pw} x {ph} is not the shape of {w} x {h}");
+    assert!(preview.pixels.iter().any(|p| p.a() > 0), "{name}: the preview is blank");
+}
+
+#[test]
+fn the_preview_of_a_placed_bmp_is_its_picture() {
+    assert_preview_picture("red.bmp", red_bmp(), (3.0, 2.0));
+}
+
+#[test]
+fn the_preview_of_a_placed_gif_is_its_picture() {
+    assert_preview_picture("two.gif", two_pixel_gif(), (2.0, 1.0));
+}
+
+#[test]
+fn the_preview_of_a_placed_tiff_is_its_picture() {
+    assert_preview_picture("grey.tif", grey_tiff(), (4.0, 2.0));
+}
+
+#[test]
+fn the_preview_of_a_placed_pcx_is_its_picture() {
+    assert_preview_picture("small.pcx", small_pcx(), (2.0, 2.0));
+}
+
+#[test]
+fn the_preview_of_a_placed_jpeg_2000_image_is_its_picture() {
+    assert_preview_picture("grey.j2k", grey_j2k(), (4.0, 4.0));
+}
+
+#[test]
+fn the_preview_of_a_placed_png_is_its_picture() {
+    assert_preview_picture("flat.png", flat_png(30, 20), (30.0, 20.0));
+}
+
+fn edit_generation(h: &Harness<'static, PdfCraftApp>) -> u64 {
+    let s = h.state();
+    s.session.get(s.views[0].id).unwrap().edit_generation()
+}
+
+fn can_undo(h: &Harness<'static, PdfCraftApp>) -> bool {
+    let s = h.state();
+    s.session.get(s.views[0].id).unwrap().can_undo().is_some()
+}
+
+fn added_rects(h: &Harness<'static, PdfCraftApp>) -> Vec<[f64; 4]> {
+    added(h).into_iter().filter(|a| matches!(a.content, pdfcraft_engine::AddedContent::Image(_))).map(|a| a.content.rect()).collect()
+}
+
+/// Starting an image placement is refused, with the reason, when there is no document, when the
+/// bytes are not an image and when they are empty; nothing starts and nothing changes.
+#[test]
+fn an_image_placement_is_refused_without_a_document_or_an_image() {
+    let mut app = PdfCraftApp::new();
+    assert_eq!(app.start_image_placement("logo.png".into(), flat_png(30, 20)), Err("no document is open".to_string()));
+    let _gpu = gpu();
+    let mut h = harness();
+    let before = edit_generation(&h);
+    let not_an_image = h.state_mut().start_image_placement("x.png".into(), b"this is plain text, not an image".to_vec());
+    assert!(not_an_image.is_err_and(|e| !e.is_empty()));
+    let empty = h.state_mut().start_image_placement("empty.png".into(), Vec::new());
+    assert!(empty.is_err_and(|e| !e.is_empty()));
+    // Nothing started: a click on the page places nothing.
+    let p = at(&h, 150.0, 200.0);
+    click(&mut h, p);
+    assert!(added_rects(&h).is_empty());
+    assert_eq!(edit_generation(&h), before);
+}
+
+/// Escape before the click drops the placement: nothing is placed and the document is unchanged,
+/// and a later click on the page places nothing either.
+#[test]
+fn a_cancelled_image_placement_changes_nothing() {
+    let _gpu = gpu();
+    let mut h = harness();
+    let before = edit_generation(&h);
+    h.state_mut().start_image_placement("logo.png".into(), flat_png(30, 20)).unwrap();
+    h.hover_at(at(&h, 150.0, 200.0));
+    h.run_steps(3);
+    assert_eq!(edit_generation(&h), before, "starting changes nothing");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let p = at(&h, 150.0, 200.0);
+    click(&mut h, p);
+    assert!(added_rects(&h).is_empty());
+    assert_eq!(edit_generation(&h), before);
+    assert!(!can_undo(&h));
+}
+
+/// A click on the page places the image there as one edit: centred on the click, at its natural
+/// size, and one undo takes it away.
+#[test]
+fn a_click_places_the_pending_image_as_one_undoable_edit() {
+    let _gpu = gpu();
+    let mut h = harness();
+    let before = edit_generation(&h);
+    h.state_mut().start_image_placement("logo.png".into(), flat_png(30, 20)).unwrap();
+    h.run_steps(2);
+    assert!(added_rects(&h).is_empty(), "nothing is placed before the click");
+    let p = at(&h, 150.0, 200.0);
+    click(&mut h, p);
+    let rects = added_rects(&h);
+    assert_eq!(rects.len(), 1);
+    let [x0, y0, x1, y1] = rects[0];
+    assert!((x1 - x0 - 30.0).abs() < 0.05 && (y1 - y0 - 20.0).abs() < 0.05, "natural size: {:?}", rects[0]);
+    assert!(((x0 + x1) / 2.0 - 150.0).abs() < 0.5 && ((y0 + y1) / 2.0 - 200.0).abs() < 0.5, "centred on the click: {:?}", rects[0]);
+    assert!(edit_generation(&h) > before);
+    assert!(can_undo(&h));
+    // The mode is over: a second click places nothing more.
+    let q = at(&h, 60.0, 80.0);
+    click(&mut h, q);
+    assert_eq!(added_rects(&h).len(), 1);
+    assert!(h.state_mut().execute("edit.undo"));
+    h.run_steps(3);
+    assert!(added_rects(&h).is_empty(), "one undo removes it");
+}
+
+/// A click near an edge keeps the whole image on the page.
+#[test]
+fn a_click_at_the_page_edge_keeps_the_image_inside_the_page() {
+    let _gpu = gpu();
+    let mut h = harness();
+    h.state_mut().start_image_placement("logo.png".into(), flat_png(30, 20)).unwrap();
+    h.run_steps(2);
+    let p = at(&h, 2.0, 2.0);
+    click(&mut h, p);
+    let rects = added_rects(&h);
+    assert_eq!(rects.len(), 1);
+    let [x0, y0, x1, y1] = rects[0];
+    assert!(x0 >= -0.01 && y1 <= 400.01 && x1 - x0 > 29.9 && y1 - y0 > 19.9, "inside the page: {:?}", rects[0]);
+}
+
+/// The 480 x 180 px PNG is placed at 480 x 180 points on a page large enough for it.
+#[test]
+fn a_480_by_180_pixel_png_is_placed_at_480_by_180_points() {
+    let _gpu = gpu();
+    let content = "0.9 g 0 0 1000 1000 re f";
+    let pdf = format!(
+        "%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 1000 1000] >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /Contents 4 0 R >> endobj\n4 0 obj << /Length {} >> stream\n{content}\nendstream endobj\ntrailer << /Root 1 0 R >>\n%%EOF",
+        content.len()
+    );
+    let mut h = harness_bytes(pdf.into_bytes());
+    h.state_mut().set_option("zoom", "50").unwrap();
+    crate::support::settle(&mut h);
+    h.state_mut().start_image_placement("wide.png".into(), flat_png(480, 180)).unwrap();
+    h.run_steps(2);
+    let r = h.state().views[0].page_screen_rect(0).expect("on screen");
+    let k = r.width() / 1000.0;
+    let p = r.min + egui::vec2(500.0 * k, 500.0 * k);
+    click(&mut h, p);
+    let rects = added_rects(&h);
+    assert_eq!(rects.len(), 1);
+    let [x0, y0, x1, y1] = rects[0];
+    assert!((x1 - x0 - 480.0).abs() < 0.05 && (y1 - y0 - 180.0).abs() < 0.05, "480 x 180 points: {:?}", rects[0]);
+}
+
+/// Dragging a corner handle of a placed image, with no modifier key, keeps its proportions.
+#[test]
+fn a_corner_drag_of_a_placed_image_keeps_its_proportions() {
+    let _gpu = gpu();
+    let mut h = harness();
+    h.state_mut().start_image_placement("logo.png".into(), flat_png(120, 60)).unwrap();
+    h.run_steps(2);
+    let p = at(&h, 150.0, 200.0);
+    click(&mut h, p);
+    let [_, y0, x1, _] = added_rects(&h)[0];
+    let corner = at(&h, x1 as f32, (400.0 - y0) as f32);
+    let to = corner + egui::vec2(60.0, 4.0);
+    h.hover_at(corner);
+    h.run_steps(2);
+    h.drag_at(corner);
+    h.run_steps(2);
+    h.hover_at(to);
+    h.run_steps(2);
+    h.drop_at(to);
+    h.run_steps(4);
+    let [a0, b0, a1, b1] = added_rects(&h)[0];
+    let (w, hh) = (a1 - a0, b1 - b0);
+    assert!(w > 125.0, "the image grew: {w}");
+    assert!((w / hh - 2.0).abs() < 0.02, "proportions kept: {w} x {hh}");
+}

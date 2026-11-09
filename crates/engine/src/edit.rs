@@ -15,6 +15,28 @@ mod run;
 
 pub use labels::{BATCH_LABELS, EDIT_LABELS};
 pub(crate) use run::{EditCtx, check_permission, run_edit};
+pub use run::{added_image_natural_size, fit_added_image};
+
+/// A password that opens another file. Its `Debug` output hides it, so an edit that carries one
+/// can be logged or put in a test failure without the password in the text.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SourcePassword(String);
+
+impl SourcePassword {
+    pub fn new(password: impl Into<String>) -> Self {
+        Self(password.into())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SourcePassword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SourcePassword(..)")
+    }
+}
 
 /// Edits that can be applied to a document. Page indices are 0-based.
 #[derive(Clone, Debug, PartialEq)]
@@ -77,6 +99,9 @@ pub enum Edit {
         at: usize,
         /// How a form field whose name the document already uses is kept separate.
         field_conflicts: pdfcraft_organize::FieldConflicts,
+        /// The password (user or owner) that opens the inserted PDF, when it is encrypted. It is
+        /// used only to open that file, and is in no label, error text or `Debug` output.
+        password: Option<SourcePassword>,
     },
     /// Add a bookmark to `page` as child `index` of the bookmark at `parent` (`[]` = top level).
     /// It goes to the user-space point (`left`, `top`) of the page at the reader's zoom, and

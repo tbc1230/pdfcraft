@@ -73,6 +73,11 @@ fn tool_card(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static c
 
 /// Draw the Home page with the welcome text, community card and recent documents.
 pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
+    // The web build shows no home screen: with no document open the page area stays empty, with
+    // no actions and no messages, because Workspace owns both (fork change "interface-parts-hidden").
+    if cfg!(target_arch = "wasm32") {
+        return;
+    }
     let t = Tokens::get(ui.ctx());
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: 36, right: 36, top: 28, bottom: 28 }).show(ui, |ui| {

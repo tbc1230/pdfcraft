@@ -65,7 +65,8 @@ fn new_bookmark(h: &mut Harness<'static, PdfCraftApp>) -> (Option<usize>, DestVi
     h.run_steps(3);
     let id = h.state().views[0].id;
     let outline = &h.state().session.get(id).unwrap().info.outline;
-    let made = outline.iter().find(|b| b.title == "Untitled").expect("the new bookmark");
+    // With text selected the title is that text, so the new bookmark is the last one.
+    let made = outline.last().expect("the new bookmark");
     (made.page, made.view)
 }
 

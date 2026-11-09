@@ -31,11 +31,102 @@ pub(crate) const SELECT_ALL: Shortcut = Shortcut::cmd("A");
 pub(crate) const PAGE_PREV: Shortcut = Shortcut::cmd("←");
 pub(crate) const PAGE_NEXT: Shortcut = Shortcut::cmd("→");
 
-/// Whether the editor offers the command to the user. The web build embeds the editor in Workspace,
-/// which sets the interface language, theme and the other settings itself, so it does not offer
-/// Preferences (fork change "preferences-hidden"). The desktop build offers every command.
+/// The commands the web build offers (fork changes "preferences-hidden" and "offered-commands").
+/// The web build embeds the editor in Workspace and offers only the commands that a story of the
+/// fork's backlog needs the user to run inside the editor; every other command is refused. This is
+/// the one list every surface follows: menus, command search, keyboard shortcuts, the shortcuts
+/// list, the hotbar, context menus, the control channel and `execute`. The desktop build offers
+/// every command. A group names the backlog story that needs it, by its exact title. Not on the
+/// list, on purpose: Save and Save As, the commands of the stand-alone application (open, create,
+/// close, recent files, tabs, Tab Order), the theme commands, the commands that only open a hidden
+/// panel, the network and upstream links and Preferences.
+const OFFERED_ON_THE_WEB: &[&str] = &[
+    // "Edit on the PdfCraft editing canvas": the canvas's own Select and Hand tools.
+    "view.select_tool",
+    "view.hand_tool",
+    // "Make pages larger or smaller": the zoom commands that are registered (zoom in and out are
+    // view keys of the canvas).
+    "view.marquee_zoom",
+    // "Fit pages to the document view".
+    "view.fit_width_scrolling",
+    "view.fit_one_page",
+    // "Choose how pages are arranged".
+    "view.layout.single",
+    "view.layout.two_up",
+    "view.continuous",
+    // "Read without distractions".
+    "view.read_mode",
+    // "Present the document on the full screen".
+    "view.full_screen",
+    // "Print the document".
+    "print.dialog",
+    // "Go directly to a page".
+    "view.focus_page_input",
+    // "Search the whole document as I type" and "Step through the matches".
+    "edit.find",
+    // "List all matches": Advanced search is the find bar's results list.
+    "edit.advanced_search",
+    // "Find and run an action by name" and "Run frequent editor actions from the keyboard".
+    "view.palette",
+    // "Mark a passage with text markup".
+    "comment.highlight",
+    "comment.underline",
+    "comment.squiggly",
+    "comment.strikeout",
+    // "Place a note at a point on a page".
+    "comment.note",
+    // "Write a remark in a text box on a page".
+    "comment.freetext",
+    // "Draw freehand on a page".
+    "comment.ink",
+    // "Draw a shape around content" ("each shape tool the editor provides") and "Move and resize a
+    // placed object" (it names clouds).
+    "comment.square",
+    "comment.circle",
+    "comment.line",
+    "comment.arrow",
+    "comment.polygon",
+    "comment.polyline",
+    "comment.cloud",
+    // "List all markup in the comments panel".
+    "comment.list",
+    // "Correct wording in a Latin-script paragraph".
+    "edit.edit_text",
+    // "Place an image on a page".
+    "edit.image",
+    // "Add a link over an area of a page".
+    "edit.link",
+    // "Add a bookmark".
+    "bookmark.add",
+    // "See all pages in the Organize pages view".
+    "page.organize",
+    // "Delete selected pages".
+    "page.delete",
+    // "Insert blank pages".
+    "page.insert_blank",
+    // "Insert pages from another PDF".
+    "page.insert",
+    // "Undo and redo markup changes" and "Undo and redo page changes".
+    "edit.undo",
+    "edit.redo",
+    // "Expose the editor's redaction in the WASM library build": mark text, an area or an image,
+    // then apply.
+    "redact.mark",
+    "redact.apply",
+    // "See the document's properties".
+    "file.properties",
+    // "Redact confidential content from the result": "when the user copies the text of the page".
+    "edit.copy",
+    // "Hide upstream interface parts Workspace does not offer": the Tools and Inspector panels are
+    // shown as far as actions of the backlog need them, and these toggles open and close them.
+    "view.tools_pane",
+    "view.side_panel",
+];
+
+/// Whether the editor offers the command to the user: in the web build only a command on
+/// [`OFFERED_ON_THE_WEB`], on the desktop every command.
 pub(crate) fn offered(id: &str) -> bool {
-    !(cfg!(target_arch = "wasm32") && id == "app.preferences")
+    !cfg!(target_arch = "wasm32") || OFFERED_ON_THE_WEB.contains(&id)
 }
 
 /// Whether shortcuts are written the macOS way (`⇧⌘S`) rather than `Ctrl+Shift+S`. egui knows the
@@ -105,10 +196,38 @@ impl PdfCraftApp {
             && match spec.id {
                 "comment.copy" => self.active.and_then(|i| self.views.get(i)).is_some_and(|v| v.comments.selected.is_some()),
                 "comment.paste" => self.comment_clipboard.is_some(),
+                // The one delete rule (`DocView::pages_deletable`), shared by every surface that offers
+                // Delete: assembly allowed, and at least one page left after it.
+                "page.delete" => self.delete_pages_allowed(),
                 "view.previous_view" => self.active.and_then(|i| self.views.get(i)).is_some_and(|v| !v.back.is_empty()),
                 "view.next_view" => self.active.and_then(|i| self.views.get(i)).is_some_and(|v| !v.forward.is_empty()),
                 _ => true,
             }
+    }
+
+    /// New bookmark, for every way to ask for it (the command, Ctrl+B, the menu, command search, the
+    /// panel's button and the page context menu): at the end of the outline, titled with the
+    /// selected text on one line (at most 128 characters) or "Untitled", opening the page at the
+    /// top-left of the selection or, with none, at the top of the view; then open for renaming with
+    /// its whole title selected. Whether it is allowed is the caller's (`command_enabled`).
+    pub(crate) fn add_bookmark(&mut self) {
+        let Some((i, id)) = self.active_ids() else { return };
+        let (Some(view), Some(doc)) = (self.views.get(i), self.session.get(id)) else { return };
+        let index = doc.info.outline.len();
+        let (page, [left, top]) = view.bookmark_position(&doc.info).unwrap_or((view.current, [None, None]));
+        let (left, top) = (left.map(f64::from), top.map(f64::from));
+        let title = view.bookmark_title();
+        if self.apply_edit(Edit::AddBookmark { parent: vec![], index, title: title.clone(), page, left, top }) {
+            // Like Acrobat: the new bookmark starts in rename mode.
+            self.bookmark_rename = Some((vec![index], title));
+            self.right = Some(crate::RightPanel::Bookmarks);
+        }
+    }
+
+    /// Whether the active document's selected pages (or its current page) may be deleted now.
+    pub(crate) fn delete_pages_allowed(&self) -> bool {
+        let found = self.active_ids().and_then(|(i, id)| Some((self.views.get(i)?, self.session.get(id)?)));
+        found.is_some_and(|(view, doc)| view.can_delete_pages(doc))
     }
 
     /// Run a registered command by id. Returns `false` when the id is unknown or the command
@@ -126,8 +245,13 @@ impl PdfCraftApp {
         }
     }
 
+    /// Whether the permissions of the active document allow page changes.
+    fn assembly_allowed(&self) -> bool {
+        self.active_ids().and_then(|(_, id)| self.session.get(id)).is_some_and(|d| d.allows_assembly())
+    }
+
     /// Why the command can't run right now, for the user.
-    fn disabled_reason(&self, spec: &CommandSpec) -> String {
+    pub(crate) fn disabled_reason(&self, spec: &CommandSpec) -> String {
         match spec.needs {
             commands::Needs::Undo => tl!("Nothing to undo").to_string(),
             commands::Needs::Redo => tl!("Nothing to redo").to_string(),
@@ -154,6 +278,10 @@ impl PdfCraftApp {
                 }
             }
             commands::Needs::Unlock if self.active.is_some() => tl!("This document has no restrictions to lift").to_string(),
+            // Page changes are allowed here, so the selection is what the rule refuses.
+            commands::Needs::Assembly if spec.id == "page.delete" && self.active.is_some() && self.assembly_allowed() => {
+                tl!("At least one page must remain").to_string()
+            }
             commands::Needs::Assembly | commands::Needs::Modification | commands::Needs::Annotate if self.active.is_some() => {
                 tl!("The document's security settings don't allow this change").to_string()
             }
@@ -388,7 +516,7 @@ impl PdfCraftApp {
                     self.dialog = Some(Dialog::PageProps);
                 }
             }
-            "bookmark.add" => self.bookmark_action(crate::panels::BmAction::New),
+            "bookmark.add" => self.add_bookmark(),
             "bookmark.from_structure" => self.bookmark_action(crate::panels::BmAction::FromStructure),
             "bookmark.from_text_styles" => self.bookmark_action(crate::panels::BmAction::FromTextStyles),
             "page.organize" => {
@@ -924,6 +1052,53 @@ mod tests {
         assert_eq!(command_shortcut_label(&ctx, "view.read_mode"), "⌃⌘H");
         assert_eq!(command_modifier_label(&ctx), "⌘");
         crate::i18n::set_current(previous);
+    }
+
+    /// The web list names only registered commands, each once.
+    #[test]
+    fn web_list_names_registered_commands_once() {
+        let mut seen = std::collections::HashSet::new();
+        for id in OFFERED_ON_THE_WEB {
+            assert!(commands::command(id).is_some(), "{id} is not a registered command");
+            assert!(seen.insert(*id), "{id} is listed twice");
+        }
+    }
+
+    /// The listed commands are offered in both builds; every other registered command is refused
+    /// in the web build only, and the desktop build offers it.
+    #[test]
+    fn only_listed_commands_are_offered_on_the_web() {
+        let web = cfg!(target_arch = "wasm32");
+        for id in OFFERED_ON_THE_WEB {
+            assert!(offered(id), "{id}");
+        }
+        for spec in COMMANDS.iter().filter(|c| !OFFERED_ON_THE_WEB.contains(&c.id)) {
+            assert_eq!(offered(spec.id), !web, "{}", spec.id);
+        }
+        // What Workspace owns or the stand-alone application has stays refused on the web only.
+        for id in ["file.save", "create.blank", "view.theme.dark", "app.preferences", "form.tab_order.row", "help.discord"] {
+            assert!(!OFFERED_ON_THE_WEB.contains(&id), "{id} must not be on the list");
+            assert_eq!(offered(id), !web, "{id}");
+        }
+        // What the backlog keeps stays offered in both builds.
+        for id in ["edit.find", "edit.advanced_search", "comment.list", "page.organize", "file.properties", "view.palette", "edit.undo"] {
+            assert!(offered(id), "{id}");
+        }
+        assert_eq!(offered("not.a.command"), !web);
+    }
+
+    /// `execute` runs nothing the web build does not offer. On the desktop the command would
+    /// run, so this part only checks in the web build.
+    #[test]
+    fn execute_refuses_a_command_that_is_not_offered() {
+        if !cfg!(target_arch = "wasm32") {
+            return;
+        }
+        let mut app = PdfCraftApp::new();
+        for spec in COMMANDS.iter().filter(|c| !OFFERED_ON_THE_WEB.contains(&c.id)) {
+            assert!(!app.execute(spec.id), "{}", spec.id);
+            assert!(app.dialog.is_none(), "{} opened a dialog", spec.id);
+        }
     }
 
     /// Next and previous tab step one place and wrap around at either end; from no tab they go

@@ -22,7 +22,38 @@ pub enum SaveTarget {
     As,
 }
 
+/// Why [`PdfCraftApp::take_save_bytes`] gave no bytes.
+pub(crate) enum TakeBytes {
+    /// The document may not change (flattening was refused); the user has been told.
+    Refused,
+    /// The engine could not write the bytes; its error text.
+    Failed(String),
+}
+
 impl PdfCraftApp {
+    /// The bytes of document `id` with every edit so far: Fill & Sign marks flattened when the
+    /// preference is on, then the engine's save bytes. Typing in open fields is committed before
+    /// (`commit_typing_in`). Nothing is delivered and nothing is marked saved: call
+    /// [`Self::finish_save`] once the bytes are safe. Used by Save in the web build and by the host's save call.
+    pub(crate) fn take_save_bytes(&mut self, id: pdfcraft_engine::DocId) -> Result<std::sync::Arc<Vec<u8>>, TakeBytes> {
+        if !self.flatten_fill_sign_for_save(id) {
+            return Err(TakeBytes::Refused);
+        }
+        self.session.save_bytes(id).map_err(|e| TakeBytes::Failed(e.to_string()))
+    }
+
+    /// Record that `bytes` from [`Self::take_save_bytes`] were saved: the document has no unsaved
+    /// changes, and its view is refreshed.
+    pub(crate) fn finish_save(&mut self, id: pdfcraft_engine::DocId, bytes: std::sync::Arc<Vec<u8>>) -> Result<(), pdfcraft_engine::EditError> {
+        self.session.mark_saved(id, bytes, None)?;
+        if let Some(doc) = self.session.get(id)
+            && let Some(view) = self.views.iter_mut().find(|v| v.id == id)
+        {
+            view.document_changed(&doc.info);
+        }
+        Ok(())
+    }
+
     /// Save the active document. Returns `true` if it was written.
     pub fn save_active(&mut self, target: SaveTarget) -> bool {
         match self.active {
@@ -74,13 +105,11 @@ impl PdfCraftApp {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = path;
-            if !self.flatten_fill_sign_for_save(id) {
-                return false;
-            }
-            let bytes = match self.session.save_bytes(id) {
+            let bytes = match self.take_save_bytes(id) {
                 Ok(b) => b,
-                Err(e) => {
-                    self.notify_fmt("Couldn't save {name}: {e}", &[("name", &name), ("e", &e.to_string())]);
+                Err(TakeBytes::Refused) => return false,
+                Err(TakeBytes::Failed(e)) => {
+                    self.notify_fmt("Couldn't save {name}: {e}", &[("name", &name), ("e", &e)]);
                     return false;
                 }
             };
@@ -93,12 +122,7 @@ impl PdfCraftApp {
             };
             match delivered {
                 Ok(()) => {
-                    let _ = self.session.mark_saved(id, bytes, None);
-                    if let Some(doc) = self.session.get(id)
-                        && let Some(view) = self.views.get_mut(index)
-                    {
-                        view.document_changed(&doc.info);
-                    }
+                    let _ = self.finish_save(id, bytes);
                     // The host reports where the file went (and any failure) itself.
                     if !to_host {
                         self.notify_fmt("Downloaded {name}", &[("name", &name)]);

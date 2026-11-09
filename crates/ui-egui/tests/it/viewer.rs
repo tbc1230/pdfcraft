@@ -2545,3 +2545,122 @@ fn the_accessible_window_has_the_window_title_as_its_name() {
     assert_eq!(name(&h).as_deref(), Some("Quarterly report • — PdfCraft"));
     assert_eq!(name(&h), Some(h.state().window_title.clone()));
 }
+
+/// The find bar's "n of N" and the Search panel's "N instances" count the same matches, the two
+/// options change the count as they should, and searching edits nothing.
+#[test]
+fn the_find_bar_and_the_search_panel_count_the_same_matches() {
+    let mut h = harness();
+    let i = h.state().active.unwrap();
+    let state = |h: &Harness<'static, PdfCraftApp>| {
+        let doc = h.state().session.get(h.state().views[i].id).unwrap();
+        (doc.edit_generation(), doc.can_undo().is_some())
+    };
+    let before = state(&h);
+    let wait = |h: &mut Harness<'static, PdfCraftApp>, n: usize| {
+        for _ in 0..3000 {
+            h.run_steps(2);
+            if h.state().views[i].find.as_ref().is_some_and(|f| f.matches.len() == n && f.query == f.case_query) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        h.run_steps(2);
+    };
+    assert!(h.state_mut().execute("edit.find"));
+    h.run_steps(2);
+    // Page i reads "Page i+1 pages PAGE" on each of the 2 pages: "page" is 3 matches a page.
+    h.state_mut().views[i].find.as_mut().unwrap().query = "page".into();
+    wait(&mut h, 6);
+    h.get_by_label("1 of 6");
+    // Whole words only: "Page" and "PAGE", not "pages".
+    h.state_mut().views[i].find.as_mut().unwrap().whole_words = true;
+    h.state_mut().views[i].find.as_mut().unwrap().case_query.clear();
+    wait(&mut h, 4);
+    h.get_by_label("1 of 4");
+    // Case-sensitive: only the lower-case "page" inside "pages".
+    {
+        let f = h.state_mut().views[i].find.as_mut().unwrap();
+        f.whole_words = false;
+        f.case_sensitive = true;
+        f.case_query.clear();
+    }
+    wait(&mut h, 2);
+    h.get_by_label("1 of 2");
+    // The panel lists the same number.
+    assert!(h.state_mut().execute("edit.advanced_search"));
+    h.run_steps(3);
+    h.get_by_label("2 instances");
+    assert_eq!(state(&h), before, "searching edits nothing");
+}
+
+/// One 300x300 page with the Arabic line "بحث نص عربي" drawn in visual order (the string reversed)
+/// with a Type0 Identity-H font that is not embedded and has a ToUnicode map, as such files hold it.
+fn arabic_visual_order_pdf() -> Vec<u8> {
+    let logical: Vec<char> = "بحث نص عربي".chars().collect();
+    let mut distinct: Vec<char> = Vec::new();
+    for c in &logical {
+        if !distinct.contains(c) {
+            distinct.push(*c);
+        }
+    }
+    let cid = |c: char| distinct.iter().position(|d| *d == c).map_or(1, |p| p as u16 + 1);
+    let visual: String = logical.iter().rev().map(|c| format!("{:04X}", cid(*c))).collect();
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /Adobe-Identity-UCS def /CMapType 2 def\n1 begincodespacerange <0000> <FFFF> endcodespacerange\n",
+    );
+    cmap.push_str(&format!("{} beginbfchar\n", distinct.len()));
+    for c in &distinct {
+        cmap.push_str(&format!("<{:04X}> <{:04X}>\n", cid(*c), *c as u32));
+    }
+    cmap.push_str("endbfchar\nendcmap end end\n");
+    let content = format!("BT /F1 14 Tf 40 200 Td <{visual}> Tj ET");
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 300] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        "<< /Type /Font /Subtype /Type0 /BaseFont /ArialUnicodeMS /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 8 0 R >>".to_string(),
+        "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /ArialUnicodeMS /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 7 0 R /DW 600 >>".to_string(),
+        "<< /Type /FontDescriptor /FontName /ArialUnicodeMS /Flags 4 /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{cmap}endstream", cmap.len()),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offs = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offs.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let x = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offs {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+/// Right-to-left text drawn in visual order is found by a query in logical order. If this finds
+/// nothing, run with PDFCRAFT_TEXT_DEBUG=1: a "NOUNICODE" line means the font gave no Unicode,
+/// no glyph lines at all mean the non-embedded font was not loaded.
+#[test]
+fn right_to_left_text_drawn_in_visual_order_is_found_in_logical_order() {
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("arabic.pdf", None, arabic_visual_order_pdf()).unwrap();
+        app
+    });
+    crate::support::settle(&mut h);
+    assert!(h.state_mut().execute("edit.find"));
+    h.run_steps(2);
+    h.state_mut().views[0].find.as_mut().unwrap().query = "نص".into();
+    for _ in 0..3000 {
+        h.run_steps(2);
+        if h.state().views[0].find.as_ref().is_some_and(|f| !f.matches.is_empty()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(h.state().views[0].find.as_ref().unwrap().matches.len(), 1);
+}

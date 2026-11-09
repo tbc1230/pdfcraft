@@ -135,7 +135,13 @@ impl Drop for WakeOnExit {
 
 impl PdfCraftApp {
     pub fn open_print(&mut self) {
-        let Some((i, _)) = self.active_ids() else { return };
+        let Some((i, id)) = self.active_ids() else { return };
+        // Every way in (the command, the button, the page menu, a form button, a script) stops here
+        // when the document's permissions forbid printing; the command and the button already do.
+        if !self.session.get(id).is_some_and(|d| d.allows_printing()) {
+            self.notify(crate::print_refused());
+            return;
+        }
         let (printers, printers_loading) = match self.printer_source.clone() {
             // The list from the last time the dialog opened, until the fresh one arrives.
             #[cfg(not(target_arch = "wasm32"))]
@@ -390,7 +396,15 @@ impl PdfCraftApp {
     /// a preset path returns `true` once the save picker is showing; the file is written on a
     /// later frame, when the user has chosen where.
     pub fn print_now(&mut self) -> bool {
-        // What's typed in a form field is part of what's printed (#166).
+        // Nothing is committed, drawn or sent for a document that forbids printing.
+        if let Some((_, id)) = self.active_ids()
+            && self.session.get(id).is_some_and(|d| !d.allows_printing())
+        {
+            self.notify(crate::print_refused());
+            return false;
+        }
+        // What's typed in a form field is part of what's printed (#166): the user's own pending
+        // edit is applied first. Printing itself edits nothing: `print_pdf` works on a copy.
         if !self.commit_form_typing() {
             return false;
         }
@@ -470,6 +484,13 @@ impl PdfCraftApp {
     /// prepared is replaced. The dialog closes at once.
     #[cfg(target_arch = "wasm32")]
     fn print_in_browser(&mut self, name: String, bytes: Vec<u8>, sheets: Vec<(f64, f64)>) -> bool {
+        // A job the browser cannot take as pictures (too many sheets, a sheet without a usable
+        // size) gives the user the print-ready PDF as a download instead of only a message. The
+        // download is not a save: it sends no `pdfcraft:save` and changes nothing in the document.
+        if let Err(e) = crate::web_print::plan_dpi(&sheets) {
+            self.print_tasks.web_last = Some((name, std::sync::Arc::new(bytes)));
+            return self.web_print_failed(&e);
+        }
         match crate::web_print::WebPrintJob::new(bytes, sheets, name) {
             Ok(job) => {
                 let n = job.total().to_string();
@@ -497,8 +518,12 @@ impl PdfCraftApp {
         let Some(job) = self.print_tasks.web_job.as_mut() else { return };
         if !job.finished() {
             if let Err(e) = job.step(&mut crate::web_print::blob_url) {
-                self.print_tasks.web_job = None;
-                self.notify_error(e);
+                // The sheets cannot all be drawn as pictures (too much to hold): the print-ready
+                // PDF is downloaded instead.
+                if let Some(job) = self.print_tasks.web_job.take() {
+                    self.print_tasks.web_last = Some((job.name.clone(), job.pdf.clone()));
+                }
+                self.web_print_failed(&e);
                 return;
             }
             let (done, total) = (job.done().to_string(), job.total().to_string());
@@ -514,23 +539,31 @@ impl PdfCraftApp {
         self.print_tasks.web_last = Some((job.name.clone(), job.pdf.clone()));
         match crate::web_print::print_in_iframe(&html, urls, self.print_tasks.web_failed.clone(), self.ctx.clone()) {
             Ok(()) => self.notify_tr("Opening the browser's print dialog…"),
-            Err(e) => self.web_print_failed(&e),
+            Err(e) => {
+                self.web_print_failed(&e);
+            }
         }
     }
 
     /// The browser wouldn't print (a sandboxed frame, a picture it couldn't decode): offer the
-    /// print-ready PDF as a download instead, so the work isn't lost.
+    /// print-ready PDF as a download instead, so the work isn't lost. `true` once it is downloaded.
     #[cfg(target_arch = "wasm32")]
-    fn web_print_failed(&mut self, error: &str) {
+    fn web_print_failed(&mut self, error: &str) -> bool {
         let Some((name, pdf)) = self.print_tasks.web_last.take() else {
             self.notify_error(error);
-            return;
+            return false;
         };
         let stem = name.trim_end_matches(".pdf").trim_end_matches(".PDF");
         let file = format!("{stem} (print).pdf");
         match crate::editing::download(&file, &pdf) {
-            Ok(()) => self.notify_fmt("Couldn't print from the browser ({e}); downloaded {name} to print instead", &[("e", error), ("name", &file)]),
-            Err(_) => self.notify_error(error),
+            Ok(()) => {
+                self.notify_fmt("Couldn't print from the browser ({e}); downloaded {name} to print instead", &[("e", error), ("name", &file)]);
+                true
+            }
+            Err(_) => {
+                self.notify_error(error);
+                false
+            }
         }
     }
 

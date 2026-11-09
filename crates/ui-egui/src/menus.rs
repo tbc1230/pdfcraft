@@ -289,7 +289,15 @@ impl PdfCraftApp {
                     }
                     used.push(id);
                     // A command the editor does not offer (Preferences on the web) has no menu item.
-                    crate::commands::offered(id).then(|| self.menu_item(id, None))
+                    // The menu-only items (zoom, rotate view, side panels) are view controls, not
+                    // registry commands; the web build keeps them except Cut and Paste, which
+                    // stand for the page and image clipboard commands it does not offer.
+                    let shown = if commands::command(id).is_some() {
+                        crate::commands::offered(id)
+                    } else {
+                        cfg!(not(target_arch = "wasm32")) || ![CUT, PASTE].contains(&id)
+                    };
+                    shown.then(|| self.menu_item(id, None))
                 })
                 .collect()
         };
@@ -329,15 +337,18 @@ impl PdfCraftApp {
                 edit.push(Node::submenu(tl!("Pages"), list(PAGES, &mut used)));
             }
         }
-        let mut sign = vec![Node::submenu(
-            tl!("Fill & Sign"),
-            FILL.iter()
-                .map(|&(id, label)| {
-                    used.push(id);
-                    self.menu_item(id, Some(tl!(label)))
-                })
-                .collect(),
-        )];
+        let mut sign = Vec::new();
+        let fill: Vec<Node> = FILL
+            .iter()
+            .filter(|(id, _)| crate::commands::offered(id))
+            .map(|&(id, label)| {
+                used.push(id);
+                self.menu_item(id, Some(tl!(label)))
+            })
+            .collect();
+        if !fill.is_empty() {
+            sign.push(Node::submenu(tl!("Fill & Sign"), fill));
+        }
         sign.extend(list(SIGN, &mut used));
         let window = list(WINDOW, &mut used);
         let help = list(HELP, &mut used);
@@ -353,6 +364,7 @@ impl PdfCraftApp {
             tl!("Side panels"),
             PANELS
                 .iter()
+                .filter(|(panel, ..)| crate::panels::panel_offered(*panel))
                 .map(|(_, name, label)| {
                     Item::new(CommandRef::with_params(PANEL, serde_json::json!({ "panel": name })), tl!(label)).radio(false).into()
                 })
@@ -374,8 +386,13 @@ impl PdfCraftApp {
                 Menu::new(tl!("Window"), window).role(MenuRole::Window),
                 Menu::new(tl!("Help"), craft_menu::tidy(help)).role(MenuRole::Help),
             ],
-            documents: self.menu_documents(),
+            // The web build has no tabs: which document is open is the client's choice.
+            documents: if cfg!(target_arch = "wasm32") { Vec::new() } else { self.menu_documents() },
         };
+        // A menu with nothing the web build offers (Window: it has no tabs) is not drawn.
+        if cfg!(target_arch = "wasm32") {
+            bar.menus.retain(|menu| !menu.children.is_empty());
+        }
         bar.tag_item(&CommandRef::new("help.about"), ItemRole::About);
         bar.tag_item(&CommandRef::new("app.preferences"), ItemRole::Settings);
         craft_menu::apply_state(&mut bar, |command| self.menu_state(ctx, command));
@@ -429,7 +446,7 @@ impl PdfCraftApp {
     fn tools_menu(&self, used: &[&str]) -> Vec<Node> {
         TOOL_GROUPS
             .iter()
-            .filter(|g| g.availability == Availability::Ready)
+            .filter(|g| g.availability == Availability::Ready && crate::panels::tool_listed(g.id))
             .map(|group| {
                 let mut nodes = Vec::new();
                 let mut seen: Vec<&str> = Vec::new();
@@ -438,7 +455,7 @@ impl PdfCraftApp {
                     for tool in section.items.iter().filter(|t| t.availability == Availability::Ready) {
                         let actions: &[&'static str] = if tool.actions.is_empty() { std::slice::from_ref(&tool.command) } else { tool.actions };
                         for &id in actions {
-                            if commands::command(id).is_none() || used.contains(&id) || seen.contains(&id) {
+                            if commands::command(id).is_none() || !crate::commands::offered(id) || used.contains(&id) || seen.contains(&id) {
                                 continue;
                             }
                             seen.push(id);
@@ -525,6 +542,10 @@ impl PdfCraftApp {
             return;
         }
         if !self.menu_gate(ctx).allows_command(command) || !self.menu_state(ctx, command).enabled {
+            return;
+        }
+        // A command the editor does not offer (Save on the web) runs from no menu, native or drawn.
+        if commands::command(&command.id).is_some() && !crate::commands::offered(&command.id) {
             return;
         }
         let index = param_index(command);
@@ -696,7 +717,7 @@ mod tests {
         let count = keys.len();
         keys.dedup();
         assert_eq!(keys.len(), count, "no command is listed twice");
-        for spec in commands::COMMANDS.iter().filter(|s| s.menu.is_some()) {
+        for spec in commands::COMMANDS.iter().filter(|s| s.menu.is_some() && crate::commands::offered(s.id)) {
             if spec.id == "file.open_recent" {
                 continue; // A submenu of the recent files.
             }

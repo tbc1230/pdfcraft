@@ -12,6 +12,8 @@ fn hue(g: &ToolGroup) -> Color32 {
 
 pub fn left_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
+    // The web build has no All tools list: its Tools pane starts from the Edit panel.
+    app.left = super::left_in(cfg!(target_arch = "wasm32"), app.left);
     // Organize closed another way (the grid's Close, or a page opened from it) closes the tool too,
     // as its panel's Close does, back to the workspace's own panel.
     if app.left == LeftPanel::Tool("organize") && app.active.and_then(|i| app.views.get(i)).is_some_and(|v| !v.organize) {
@@ -23,9 +25,11 @@ pub fn left_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             // Organize pages has its own panel whenever the grid shows (with a document open).
             _ if app.active.is_some() && crate::organize_panel::showing(app) => crate::organize_panel::panel(app, ui, &t),
             LeftPanel::AllTools => all_tools(app, ui, &t),
-            LeftPanel::Tool(id) => match catalog::group(id) {
+            // A group the web build does not offer (reached from a tab, the palette or a command)
+            // shows the Tools pane's list instead.
+            LeftPanel::Tool(id) => match catalog::group(id).filter(|_| super::tool_listed(id)) {
                 Some(g) => tool_detail(app, ui, &t, g),
-                None => app.left = LeftPanel::AllTools,
+                None => app.left = super::tools_home(),
             },
             LeftPanel::CalculationOrder => crate::calc_order_ui::panel(app, ui, &t),
         },
@@ -71,7 +75,9 @@ pub(super) fn clear_of_scrollbar(ui: &mut egui::Ui) {
 /// tools until View more shows them all.
 fn all_tools(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
     // Labels distinct from the Combine grid's Expand and Collapse, which can show beside them.
-    let (expand, close) = panel_header(ui, t, "All tools", Some(("maximize-2", tl!("Expand all tools"))));
+    // The web build has no expanded view (fork change "interface-parts-hidden").
+    let lead = cfg!(not(target_arch = "wasm32")).then(|| ("maximize-2", tl!("Expand all tools")));
+    let (expand, close) = panel_header(ui, t, "All tools", lead);
     if expand {
         app.expand_all_tools();
     }
@@ -127,12 +133,14 @@ fn tool_row(ui: &mut egui::Ui, t: &Tokens, g: &ToolGroup, is_pinned: bool) -> (e
     let body = rect.translate(press.offset());
     icons::paint(ui, Rect::from_min_size(body.min + vec2(6.0, 7.0), vec2(20.0, 20.0)), g.icon, 19.0, hue(g));
 
-    let pin_rect = Rect::from_center_size(body.right_center() - vec2(14.0, 0.0), vec2(22.0, 22.0));
+    // Pinning is a Home screen feature; the web build has no Home screen, so no pin control.
+    let pin_offered = cfg!(not(target_arch = "wasm32"));
+    let pin_rect = Rect::from_center_size(body.right_center() - vec2(14.0, 0.0), if pin_offered { vec2(22.0, 22.0) } else { vec2(0.0, 0.0) });
     let pin_resp = ui.interact(pin_rect, ui.scope_id().with(("pin_toggle_row", g.id)), Sense::click());
     let pin_hovered = pin_resp.hovered();
     let mut pin_clicked = false;
 
-    let pin_space = 26.0;
+    let pin_space = if pin_offered { 26.0 } else { 0.0 };
     let badge_or_hint_reserved = match (g.badge, g.availability) {
         (Some(b), _) => ui.fonts_mut(|f| f.layout_no_wrap(tl!(b).to_owned(), theme::semibold(9.5), Color32::WHITE).size().x) + 18.0,
         (None, Availability::Planned(m)) if resp.hovered() => {
@@ -167,7 +175,7 @@ fn tool_row(ui: &mut egui::Ui, t: &Tokens, g: &ToolGroup, is_pinned: bool) -> (e
     }
 
     let row_hovered = ui.rect_contains_pointer(rect) || resp.hovered();
-    if is_pinned || row_hovered || pin_hovered {
+    if pin_offered && (is_pinned || row_hovered || pin_hovered) {
         if pin_hovered {
             ui.painter().rect_filled(pin_rect, CornerRadius::same(4), t.pressed);
         }
@@ -203,7 +211,7 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
     }
     let (back, close) = panel_header(ui, t, g.label, Some(("chevron-left", tl!("Back to all tools"))));
     if back {
-        app.left = LeftPanel::AllTools;
+        app.left = super::tools_home();
         app.enter_mode(crate::Mode::AllTools);
     }
     if close {
@@ -251,8 +259,12 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
         clear_of_scrollbar(ui);
         ui.add_space(2.0);
         for s in g.sections {
+            // A section with no tool the build offers has no heading either.
+            if !s.items.iter().any(|i| crate::commands::offered(i.command)) {
+                continue;
+            }
             widgets::section_title(ui, tl!(s.title));
-            for item in s.items {
+            for item in s.items.iter().filter(|i| crate::commands::offered(i.command)) {
                 if g.id == "fill_sign" && (item.command.starts_with("sign.fill.signature") || item.command.starts_with("sign.fill.initials")) {
                     continue;
                 }
@@ -314,10 +326,14 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled_ui(marks > 0, |ui| widgets::pill_button(ui, tl!("Redact all"), true)).inner.clicked() {
+                if crate::commands::offered("redact.apply")
+                    && ui.add_enabled_ui(marks > 0, |ui| widgets::pill_button(ui, tl!("Redact all"), true)).inner.clicked()
+                {
                     run = Some("redact.apply");
                 }
-                if ui.add_enabled_ui(marks > 0, |ui| widgets::pill_button(ui, tl!("Clear all"), false)).inner.clicked() {
+                if crate::commands::offered("redact.clear")
+                    && ui.add_enabled_ui(marks > 0, |ui| widgets::pill_button(ui, tl!("Clear all"), false)).inner.clicked()
+                {
                     run = Some("redact.clear");
                 }
             });

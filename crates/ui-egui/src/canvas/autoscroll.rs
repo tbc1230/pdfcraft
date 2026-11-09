@@ -49,30 +49,39 @@ impl AutoScroll {
     /// once started, moving outside that viewport still controls the speed. `invert` is
     /// Preferences ▸ Invert middle-button drag: the returned delta scrolls the other way.
     pub(crate) fn update(&mut self, ui: &egui::Ui, viewport: egui::Rect, organize: bool, invert: bool) -> Vec2 {
-        self.update_for_platform(ui, viewport, organize, cfg!(target_os = "linux"), invert)
+        self.update_for_platform(ui, viewport, organize, (cfg!(target_os = "linux"), cfg!(target_arch = "wasm32")), invert)
     }
 
-    fn update_for_platform(&mut self, ui: &egui::Ui, viewport: egui::Rect, organize: bool, supported: bool, invert: bool) -> Vec2 {
-        let delta = if supported { self.update_latched(ui, viewport, organize) } else { self.update_drag(ui, viewport) };
+    /// `mode` is (latched auto-scroll supported, running in a browser).
+    fn update_for_platform(&mut self, ui: &egui::Ui, viewport: egui::Rect, organize: bool, mode: (bool, bool), invert: bool) -> Vec2 {
+        let (supported, web) = mode;
+        let delta = if supported { self.update_latched(ui, viewport, organize, web) } else { self.update_drag(ui, viewport, web) };
         oriented(delta, invert)
     }
 
-    fn update_latched(&mut self, ui: &egui::Ui, viewport: egui::Rect, organize: bool) -> Vec2 {
+    fn update_latched(&mut self, ui: &egui::Ui, viewport: egui::Rect, organize: bool, web: bool) -> Vec2 {
         let ctx = ui.ctx();
+        let engaged = self.active();
         let (pointer, middle_press, middle_down, middle_released, cancel, cancel_button, dt) = ctx.input(|i| {
             let cancel_button = [PointerButton::Primary, PointerButton::Secondary, PointerButton::Extra1, PointerButton::Extra2]
                 .into_iter()
                 .find(|button| i.pointer.button_pressed(*button));
+            let press = i.events.iter().find_map(|event| match event {
+                Event::PointerButton { pos, button: PointerButton::Middle, pressed: true, .. } if pos.is_finite() => Some(*pos),
+                _ => None,
+            });
+            // In a browser the canvas may not hold the keyboard focus, and the press frame is
+            // handled before eframe learns of a focus change: the pointer over the pages, or a
+            // latch already under way, stands for it.
+            let over = [i.pointer.hover_pos(), press].into_iter().flatten().any(|p| viewport.contains(p));
+            let focused = super::navigation_has_focus(i.focused, engaged || over, web);
             (
                 i.pointer.hover_pos(),
                 // Read the press event itself: later movement in this frame must not move the anchor.
-                i.events.iter().find_map(|event| match event {
-                    Event::PointerButton { pos, button: PointerButton::Middle, pressed: true, .. } if pos.is_finite() => Some(*pos),
-                    _ => None,
-                }),
+                press,
                 i.pointer.button_down(PointerButton::Middle),
                 i.pointer.button_released(PointerButton::Middle),
-                !i.focused
+                !focused
                     || i.key_pressed(Key::Escape)
                     || cancel_button.is_some()
                     || i.events.iter().any(|e| matches!(e, Event::MouseWheel { .. } | Event::Zoom(_))),
@@ -122,21 +131,27 @@ impl AutoScroll {
 
     /// Without auto-scroll, a middle-button drag pans the view 1:1, like the Hand tool. Input is
     /// blocked from the press through the release, so the drag cannot also draw, select or move.
-    fn update_drag(&mut self, ui: &egui::Ui, viewport: egui::Rect) -> Vec2 {
+    fn update_drag(&mut self, ui: &egui::Ui, viewport: egui::Rect, web: bool) -> Vec2 {
         self.anchor = None;
         self.cancel_button = None;
         let ctx = ui.ctx();
+        let engaged = self.drag.is_some();
         let (pointer, middle_press, middle_down, middle_released, focused) = ctx.input(|i| {
+            let pointer = i.pointer.latest_pos().filter(|p| p.is_finite());
+            // Read the press event itself: later movement in this frame is part of the pan.
+            let press = i.events.iter().find_map(|event| match event {
+                Event::PointerButton { pos, button: PointerButton::Middle, pressed: true, .. } if pos.is_finite() => Some(*pos),
+                _ => None,
+            });
+            // As in `update_latched`: in a browser the pointer over the pages, or a pan under way,
+            // stands for the canvas keyboard focus.
+            let over = [pointer, press].into_iter().flatten().any(|p| viewport.contains(p));
             (
-                i.pointer.latest_pos().filter(|p| p.is_finite()),
-                // Read the press event itself: later movement in this frame is part of the pan.
-                i.events.iter().find_map(|event| match event {
-                    Event::PointerButton { pos, button: PointerButton::Middle, pressed: true, .. } if pos.is_finite() => Some(*pos),
-                    _ => None,
-                }),
+                pointer,
+                press,
                 i.pointer.button_down(PointerButton::Middle),
                 i.pointer.button_released(PointerButton::Middle),
-                i.focused,
+                super::navigation_has_focus(i.focused, engaged || over, web),
             )
         });
         self.block_input = self.drag.is_some() || middle_press.is_some() || middle_down || middle_released;
@@ -274,10 +289,23 @@ mod tests {
 
     /// Run one frame; `mode` is (latched auto-scroll supported, inverted).
     fn frame(ctx: &Context, scroll: &mut AutoScroll, events: Vec<Event>, focused: bool, mode: (bool, bool), check: impl Fn(&AutoScroll, Vec2)) {
+        frame_on(ctx, scroll, events, (focused, false), mode, check);
+    }
+
+    /// Run one frame; `focus` is (window focused, running in a browser).
+    fn frame_on(
+        ctx: &Context,
+        scroll: &mut AutoScroll,
+        events: Vec<Event>,
+        focus: (bool, bool),
+        mode: (bool, bool),
+        check: impl Fn(&AutoScroll, Vec2),
+    ) {
+        let (focused, web) = focus;
         let mut output = ctx.run_ui(
             egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0))), events, focused, ..Default::default() },
             |ui| {
-                let delta = scroll.update_for_platform(ui, ui.max_rect(), false, mode.0, mode.1);
+                let delta = scroll.update_for_platform(ui, ui.max_rect(), false, (mode.0, web), mode.1);
                 check(scroll, delta);
             },
         );
@@ -361,6 +389,46 @@ mod tests {
         drag_frame(&ctx, &mut scroll, vec![Event::PointerMoved(p + vec2(0.0, 50.0))], false, |s, d| {
             assert_eq!(d, Vec2::ZERO);
             assert!(!s.panning(), "losing focus ends the pan");
+        });
+    }
+
+    #[test]
+    fn in_a_browser_the_middle_drag_pans_without_the_canvas_focus() {
+        let (ctx, mut scroll, p) = (Context::default(), AutoScroll::default(), egui::pos2(100.0, 100.0));
+        frame_on(&ctx, &mut scroll, vec![], (false, true), (false, false), |_, _| {});
+        // The press arrives in a frame that still reports no focus.
+        frame_on(&ctx, &mut scroll, vec![Event::PointerMoved(p), middle(p, true)], (false, true), (false, false), |s, _| assert!(s.panning()));
+        // The pointer may leave the pages while the pan is under way.
+        let out = egui::pos2(500.0, 140.0);
+        frame_on(&ctx, &mut scroll, vec![Event::PointerMoved(out)], (false, true), (false, false), |s, d| {
+            assert!(s.panning());
+            assert_eq!(d, out - p);
+        });
+        // A press outside the pages, without focus, starts nothing.
+        let mut other = AutoScroll::default();
+        let outside = egui::pos2(500.0, 100.0);
+        frame_on(&ctx, &mut other, vec![Event::PointerMoved(outside), middle(outside, true)], (false, true), (false, false), |s, _| {
+            assert!(!s.panning())
+        });
+        // On the desktop the same press in an unfocused window starts nothing.
+        let mut desktop = AutoScroll::default();
+        frame_on(&ctx, &mut desktop, vec![Event::PointerMoved(p), middle(p, true)], (false, false), (false, false), |s, _| assert!(!s.panning()));
+    }
+
+    #[test]
+    fn in_a_browser_auto_scroll_latches_and_runs_without_the_canvas_focus() {
+        let (ctx, mut scroll, p) = (Context::default(), AutoScroll::default(), egui::pos2(100.0, 100.0));
+        frame_on(&ctx, &mut scroll, vec![], (false, true), (true, false), |_, _| {});
+        frame_on(&ctx, &mut scroll, vec![Event::PointerMoved(p), middle(p, true), middle(p, false)], (false, true), (true, false), |s, _| {
+            assert!(s.active(), "the press frame counts as focused with the pointer over the pages");
+        });
+        frame_on(&ctx, &mut scroll, vec![Event::PointerMoved(p + vec2(0.0, 60.0))], (false, true), (true, false), |s, d| {
+            assert!(s.active());
+            assert!(d.y < 0.0, "it scrolls: {d:?}");
+        });
+        let mut desktop = AutoScroll::default();
+        frame_on(&ctx, &mut desktop, vec![Event::PointerMoved(p), middle(p, true), middle(p, false)], (false, false), (true, false), |s, _| {
+            assert!(!s.active(), "an unfocused desktop window does not latch");
         });
     }
 

@@ -20,9 +20,11 @@ pub(super) fn page_tools(ui: &mut egui::Ui, enabled: bool) -> Option<&'static st
         egui::Popup::menu(&more).show(|ui| {
             ui.set_min_width(260.0);
             for (id, label) in tools {
-                let Some(spec) = pdfcraft_engine::commands::command(id) else { continue };
+                let Some(spec) = pdfcraft_engine::commands::command(id).filter(|spec| crate::commands::offered(spec.id)) else { continue };
                 let item = egui::Button::image_and_text(icons::image(spec.icon, 16.0, ui.visuals().text_color()), label);
-                if ui.add(item).clicked() {
+                // Delete follows the one delete rule, as the thumbnails' menu and the Delete key do.
+                let allowed = id != "page.delete" || ui.data(|d| d.get_temp::<bool>(can_delete_key())).unwrap_or(false);
+                if ui.add_enabled(allowed, item).clicked() {
                     picked = Some(id);
                     ui.close();
                 }
@@ -30,6 +32,12 @@ pub(super) fn page_tools(ui: &mut egui::Ui, enabled: bool) -> Option<&'static st
         });
     });
     picked
+}
+
+/// Where `pages` leaves whether the selection (or the current page) may be deleted, for the header
+/// menu, which is drawn before the thumbnails and has no view of its own.
+fn can_delete_key() -> egui::Id {
+    egui::Id::unique("pages-panel-can-delete")
 }
 
 /// Size controls stay above the scroll area, so they remain reachable on long documents.
@@ -93,6 +101,10 @@ pub(super) fn pages(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, view: &mut cr
     let keyboard = ui.interact(ui.clip_rect(), focus_id, Sense::focusable_noninteractive());
     keyboard.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Group, ui.is_enabled(), tl!("Pages")));
     let owns_keyboard = keyboard.has_focus();
+    // The one delete rule (`DocView::pages_deletable`) for the Delete key, the thumbnails' menu and
+    // the header menu: the permissions allow it and at least one page remains.
+    let can_delete = crate::DocView::pages_deletable(editable, &view.target_pages(), info.pages.len());
+    ui.data_mut(|d| d.insert_temp(can_delete_key(), can_delete));
     // Escape remains with the panel after the pointer moves away.
     ui.memory_mut(|m| m.set_focus_lock_filter(focus_id, egui::EventFilter { escape: true, ..Default::default() }));
     // Escape drops the selection while the pointer is over the panel and nothing else wants the key.
@@ -106,12 +118,13 @@ pub(super) fn pages(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, view: &mut cr
     }
     // Delete (or Backspace) deletes the selection, or the current page, likewise.
     if !modal
-        && editable
+        && can_delete
+        && crate::commands::offered("page.delete")
         && (owns_keyboard || !ui.ctx().egui_wants_keyboard_input())
         && (owns_keyboard || ui.rect_contains_pointer(ui.clip_rect()))
         && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete) || i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace))
     {
-        delete_pages(view, info.pages.len());
+        delete_pages(view, info.pages.len(), editable);
     }
     // A new current page scrolls its thumbnail into view, as little as it takes (Acrobat), but
     // not while thumbnails are dragged: then the change counts as seen. A wheel turned or a
@@ -190,39 +203,42 @@ pub(super) fn pages(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, view: &mut cr
                 if !view.target_pages().contains(&i) {
                     view.click_page(i, egui::Modifiers::NONE, true);
                 }
-                if ui.button(tl!("Extract pages")).clicked() {
+                // Each entry runs a registry command: it is drawn only where the build offers it
+                // (the web build: fork change "interface-parts-hidden").
+                let offered = crate::commands::offered;
+                if offered("page.extract") && ui.button(tl!("Extract pages")).clicked() {
                     view.pending_action = Some(crate::canvas::ViewAction::Extract);
                     ui.close();
                 }
-                if ui.button(tl!("Split document…")).clicked() {
+                if offered("page.split") && ui.button(tl!("Split document…")).clicked() {
                     if view.selected.is_empty() {
                         view.select_pages(&[i]);
                     }
                     view.pending_action = Some(crate::canvas::ViewAction::SplitBeforeSelected);
                     ui.close();
                 }
-                if ui.add_enabled(editable, egui::Button::new(tl!("Replace pages…"))).clicked() {
+                if offered("page.replace") && ui.add_enabled(editable, egui::Button::new(tl!("Replace pages…"))).clicked() {
                     view.pending_action = Some(crate::canvas::ViewAction::ReplacePages);
                     ui.close();
                 }
                 ui.separator();
-                if ui.add_enabled(editable, egui::Button::new(tl!("Cut"))).clicked() {
+                if offered("page.cut") && ui.add_enabled(editable, egui::Button::new(tl!("Cut"))).clicked() {
                     view.pending_action = Some(crate::canvas::ViewAction::CopyPages { cut: true });
                     ui.close();
                 }
-                if ui.button(tl!("Copy")).clicked() {
+                if offered("page.copy") && ui.button(tl!("Copy")).clicked() {
                     view.pending_action = Some(crate::canvas::ViewAction::CopyPages { cut: false });
                     ui.close();
                 }
-                if ui.add_enabled(editable, egui::Button::new(tl!("Paste after"))).clicked() {
+                if offered("page.paste") && ui.add_enabled(editable, egui::Button::new(tl!("Paste after"))).clicked() {
                     view.pending_action = Some(crate::canvas::ViewAction::PastePages);
                     ui.close();
                 }
                 ui.separator();
-                let some_left = view.target_pages().len() < count;
-                // Never every page: a document keeps at least one.
-                if ui.add_enabled(editable && some_left, egui::Button::new(tl!("Delete pages"))).clicked() {
-                    delete_pages(view, count);
+                // The one delete rule: never every page, a document keeps at least one.
+                let may_delete = crate::DocView::pages_deletable(editable, &view.target_pages(), count);
+                if offered("page.delete") && ui.add_enabled(may_delete, egui::Button::new(tl!("Delete pages"))).clicked() {
+                    delete_pages(view, count, editable);
                     ui.close();
                 }
             });
@@ -255,13 +271,13 @@ fn file_drop(ui: &mut egui::Ui, t: &Tokens, view: &mut crate::DocView, rows: &[R
 }
 
 /// Queue deleting the selection (or the current page) of a document of `n` pages, unless that
-/// would leave no page. The selection goes; the current page stays on the page it showed, or on
+/// would leave no page or the permissions refuse it (`DocView::pages_deletable`). The selection goes; the current page stays on the page it showed, or on
 /// the page that follows the deleted ones.
-fn delete_pages(view: &mut crate::DocView, n: usize) {
+fn delete_pages(view: &mut crate::DocView, n: usize, editable: bool) {
     let mut pages = view.target_pages();
     pages.sort_unstable();
     pages.dedup();
-    if pages.is_empty() || pages.len() >= n {
+    if !crate::DocView::pages_deletable(editable, &pages, n) {
         return;
     }
     // Deleted pages before it shift it up; if it was deleted itself, the page after the deleted

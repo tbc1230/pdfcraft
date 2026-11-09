@@ -60,6 +60,7 @@ impl PdfCraftApp {
                 self.animation_effects = motion::AnimationEffects::parse(value).ok_or("animation_effects must be system, on, or off")?;
             }
             ("panel", _) => {
+                let before = self.right;
                 self.right = match value {
                     "comments" => Some(RightPanel::Comments),
                     "bookmarks" => Some(RightPanel::Bookmarks),
@@ -74,10 +75,18 @@ impl PdfCraftApp {
                     "compare" => Some(RightPanel::Compare),
                     "none" => None,
                     other => return Err(format!("unknown panel {other}")),
+                };
+                if let Some(panel) = self.right.filter(|p| !crate::panels::panel_offered(*p)) {
+                    self.right = before;
+                    return Err(format!("the {value} panel ({panel:?}) is not offered in this build"));
                 }
             }
             ("mode", _) => {
                 let mode = Mode::parse(value).unwrap_or(Mode::AllTools);
+                // The web build has no All tools, Convert or E-Sign workspace.
+                if crate::panels::offered_mode(mode) != mode {
+                    return Err(format!("the {value} mode is not offered in this build"));
+                }
                 self.mode_override = Some(mode);
                 self.mode = mode;
                 // As switch_mode: another workspace puts the expanded All tools view away.
@@ -86,12 +95,19 @@ impl PdfCraftApp {
                 }
             }
             ("default-mode", _) => {
-                self.default_mode = Mode::parse(value).ok_or("default-mode must be all, read, edit, convert or sign")?;
+                let mode = Mode::parse(value).ok_or("default-mode must be all, read, edit, convert or sign")?;
+                if crate::panels::default_mode_in(cfg!(target_arch = "wasm32"), mode) != mode {
+                    return Err("default-mode must be edit in this build".into());
+                }
+                self.default_mode = mode;
             }
             ("date-format", _) => self.session.set_date_format(value)?,
             ("date-language", _) => self.session.set_date_language(Some(value).filter(|v| *v != "auto"))?,
             ("tool", _) => {
                 let g = pdfcraft_engine::catalog::group(value).ok_or_else(|| format!("unknown tool {value}"))?;
+                if !crate::panels::tool_listed(g.id) {
+                    return Err(format!("the {value} tool is not offered in this build"));
+                }
                 self.select_tool(g.id);
             }
             ("left", _) => self.left_open = value != "closed",
@@ -127,6 +143,7 @@ impl PdfCraftApp {
                     "document-js" => Some(Dialog::DocumentJs),
                     "preferences" if !crate::commands::offered("app.preferences") => return Err("Preferences are not offered in this build".into()),
                     "preferences" => Some(Dialog::Preferences),
+                    "compare-files" if !crate::commands::offered("doc.compare") => return Err("Compare files is not offered in this build".into()),
                     "compare-files" => Some(Dialog::CompareFiles),
                     "action-wizard" => Some(Dialog::ActionWizard),
                     "pdfa" => Some(Dialog::PdfA),
@@ -154,6 +171,9 @@ impl PdfCraftApp {
                 if let Some(Dialog::Marks(kind)) = self.dialog {
                     self.marks_draft.opened(kind);
                 }
+            }
+            ("tools", _) if value == "full" && cfg!(target_arch = "wasm32") => {
+                return Err("the expanded All tools view is not offered in this build".into());
             }
             ("tools", _) if value == "full" => self.expand_all_tools(),
             ("tools", _) => {
@@ -351,6 +371,7 @@ impl PdfCraftApp {
                     }
                 };
             }
+            ("author", _) if self.author_locked => return Err("the author name was set by the host and cannot be changed".into()),
             ("author", _) => self.comment_prefs.author = value.to_string(),
             ("comment-tool-pinned", _) => {
                 self.comment_prefs.pinned = match value {
