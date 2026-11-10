@@ -419,16 +419,24 @@ Acceptance criteria:
 
 ### Feature: Editing existing text
 
-#### Story: Correct wording in a Latin-script paragraph
+#### Story: Correct wording in a paragraph
 
 Component: PdfCraft fork
 
-As a reviewer, I want to replace words in an existing paragraph, so that the document says the corrected text. The criteria of this story are limited to Latin-script paragraphs: no in-place correction is promised for CJK, right-to-left, rotated or subset-font text; for such text reviewers use text markup with the corrected wording in the explanation ("Mark a passage with text markup", "Add or change the explanation of a markup item") or a text box ("Write a remark in a text box on a page").
+As a reviewer, I want to replace words in an existing paragraph, so that the document says the corrected text. The criteria of this story cover paragraphs in the supported languages, English, French and Arabic: no in-place correction is promised for other scripts (such as CJK), rotated or subset-font text; for such text reviewers use text markup with the corrected wording in the explanation ("Mark a passage with text markup", "Add or change the explanation of a markup item") or a text box ("Write a remark in a text box on a page").
 Acceptance criteria:
-* Given a page with a Latin-script paragraph that uses an embedded or standard font, when the reviewer replaces a word in it, then the paragraph shows the corrected word and the replaced word no longer appears on the page.
+* Given a page with a paragraph in English, French or Arabic that uses an embedded or standard font, when the reviewer replaces a word in it, then the paragraph shows the corrected word and the replaced word no longer appears on the page.
 * Given a corrected paragraph, when the corrected text is longer or shorter than the original, then the paragraph is rewrapped.
-* Given a paragraph whose font cannot be reused for the corrected text, when the reviewer corrects it, then the corrected text is set in Helvetica.
+* Given a paragraph whose font cannot be reused for the corrected text, when the reviewer corrects it, then the corrected text is set in a font the editor provides that draws it correctly.
 * Corrections are kept as stated in "Placed objects and corrections are kept in the saved document".
+* (added; "Honour the restrictions set inside a PDF") With modification forbidden, the edit-text command is refused ("is not available now"), a click on a paragraph opens no editor and the document is unchanged. Test: e2e, paragraph sample with no-modify protection; fork test.
+* (added; "Undo and redo markup changes"; hosting "State the client reads") A correction is one undo step and one redo step; undo restores the original text. Test: e2e, paragraph sample.
+* (added; backlog criterion 1 ("no longer appears")) After the correction the replaced word is gone from the page's text and from Find, not only from view. Test: e2e, paragraph sample.
+* (added; "Save and return the bytes to the client") A correction typed but not yet applied when the client saves is in the returned bytes; if it cannot be applied the save fails with the editor's text and no bytes. Test: e2e.
+* (added; project rule "never lose work silently" (as the text box story)) A character no available font can draw is refused: the paragraph is unchanged and the user is told why. Test: e2e, paragraph sample.
+* (added; backlog criterion 3; hosting (English, French, Arabic)) A letter the paragraph's own font cannot draw (an accented French letter, an Arabic letter) is shown as typed, with no placeholder mark, in a font the editor provides; a font that already draws it is kept. Test: e2e, French and Arabic paragraphs, with and without the letters in the font.
+* (added; backlog criterion 1 (paragraph in English, French or Arabic); hosting (Arabic, right to left)) An Arabic paragraph can be corrected: the corrected word shows right to left and shaped, the paragraph keeps its direction and alignment, and the replaced word is gone. Test: e2e, Arabic paragraph sample.
+* (added; backlog criterion 2; practice) A correction affects only its paragraph: the next paragraph is unchanged and the corrected one keeps its edge, line spacing, size and colour; longer text gives more lines within the original width, shorter fewer. Test: e2e, two-paragraph sample.
 
 ## Epic: Insert images and custom marks
 
@@ -463,10 +471,19 @@ Component: PdfCraft fork
 As a reviewer, I want to turn an area of a page into a link with a target, so that readers can follow it to the related resource.
 Acceptance criteria:
 * Given an open document, when the reviewer marks an area of a page as a link and gives it a target, then the document holds a link over that area with that target.
-* A link's target is one of two kinds: a web address, or a page of the same document with a fit setting; links to other files, to stored documents and other action types are not offered.
+* A link's target is one of two kinds: a web address, or a page of the same document with a fit setting (fit page, fit width or fit height); links to other files, to stored documents and other action types are not offered.
 * Given a saved document with a link, when it is opened again, then the link is over the same area and has the same target.
 * Following a link inside the document is defined by "Follow a link to another place in the document".
 * Links are kept as stated in "Placed objects and corrections are kept in the saved document".
+* (added; Terms "Fit page, fit width, fit height"; "Follow a link to another place in the document") The page target of a link has a fit the reviewer chooses: fit page (default), fit width or fit height; following the link shows the page with that fit. (changes upstream behaviour: only fit page today) Test: e2e, four-page file, one link per fit; fork test.
+* (added; backlog criterion 2 (no other action types, no other files); practice) Only text that is a web address (begins http:// or https://, with a host) is accepted as a link's address; for other text the reviewer cannot accept and is told why. (changes upstream behaviour) Test: e2e, typed texts: no scheme, file:, javascript:, mailto:, ftp:.
+* (added; backlog criterion 2) The dialog offers only the two target kinds; no file, stored document or other action. Test: e2e.
+* (added; backlog criterion 1 ("a page of the same document"); practice) A page number outside the document (below 1, above the count, empty) cannot be accepted. Test: e2e, four-page file.
+* (added; "Honour the restrictions set inside a PDF") With modification forbidden the link command is refused and a drag adds no link. Test: e2e, no-modify sample; fork test.
+* (added; slip rule of "Draw a shape around content"; hosting "State the client reads") A drag below the slip threshold opens no dialog, Cancel adds nothing, OK adds one link as one undo step. Test: e2e.
+* (added; "Delete selected pages" (a bookmark no longer has a destination that points at the deleted page)) When the target page is deleted the link no longer has a destination on it and the other links keep theirs. Test: e2e, file with four links.
+* (added; "Move pages to a new position" (bookmarks)) When the target page is moved the link opens the moved page. Test: e2e, same file.
+* (added; hosting (three languages)) The fit labels appear in French and Arabic when the language is set; item 6 owns these catalogue entries. Test: e2e. Open: who supplies the French and Arabic wording.
 
 ## Epic: Carry machine-readable codes
 
@@ -480,6 +497,9 @@ As a reviewer, I want to place a QR code or a barcode on a page, so that readers
 Acceptance criteria:
 * Given an open document, when the reviewer chooses to place a QR code or a barcode, then the code appears on the page as an added image.
 * Given a placed code, then it can be moved and resized as "Move and resize a placed object" defines and is kept as "Placed objects and corrections are kept in the saved document" defines.
+* (added; "Place an image from bytes"; "Place the drawn signature image") Workspace hands a generated code to the editor as image bytes through a function of the exported API; the code follows the pointer at natural size, a click places it, cancel places nothing, one undo removes it, and refusals match the drawn-signature function (no document, no modification permission, not an image). Test: e2e, stand-in image of known module grid. The function's name is decided in the plan and `hosting.md`.
+* (added; story purpose (readers can scan it); "Results show the same in other PDF readers") Module colours are kept at the placed size and after enlarging with a corner handle; the code stays square (proportions rule of item 1). Test: e2e, PDFium render at two sizes.
+* (added; that criterion) Backlog criterion 2 (move, resize, kept after save) is tested on a placed code. Test: e2e, saved and reopened.
 
 ## Epic: Position placed objects precisely
 
@@ -495,7 +515,17 @@ Acceptance criteria:
 * Given a placed object on a page, when the reviewer selects it and drags it to another place on the same page, then it appears at the new place.
 * Given a placed object, when the reviewer resizes it, then it appears with the new size.
 * Given a moved and resized placed object, when the document is saved and opened again, then the object has the position and size the reviewer left it with.
-* This applies to placed objects made by other users: any reviewer who may edit the document can move and resize any placed object, whoever made it; no ownership rule is enforced.
+* This applies to placed objects made by other users: any reviewer who may edit the document can move and resize any placed object, whoever made it; no ownership rule is enforced. A locked item is not moved or resized, and a text box whose text the editor cannot redraw is not resized.
+* (added; backlog criteria 1 and 3 as written; "Place a note at a point on a page") A note has two states, closed (the icon) and opened (its pop-up). The closed icon can be moved; an opened note can be moved and resized. Test: e2e, note sample in both states; fork test.
+* (added; backlog criterion 1 (negative)) Text markup dragged across is not moved or resized and stays on its passage. Test: e2e, highlight sample.
+* (added; "Honour the restrictions set inside a PDF") With annotating forbidden by the PDF, no handle is offered and no move, resize or reshape starts on an annotation; with modification forbidden an added image is not moved or resized; nothing changes. (changes upstream behaviour: resize starts today without the check) Test: e2e, markup sample with no-annotating protection; fork test for images with no-modify protection.
+* (added; "Delete a markup item" (locked item)) A locked placed object shows no handle and is not moved or resized; nothing changes and no notice is shown. (changes upstream behaviour) Test: e2e, locked note and locked square; fork test.
+* (added; backlog criterion 5) Moving or resizing another user's item keeps its author. Test: e2e, other user's square.
+* (added; that sibling's slip rule) A click, or a drag below the slip threshold of "Draw a shape around content" (a side under 2 pt), only selects the object; nothing changes. Test: e2e, square.
+* (added; "Undo and redo markup changes"; hosting "State the client reads") A move, resize or reshape of an annotation, and a move or resize of an added image, is one undo step; redo repeats it. Test: e2e, one of each type incl. line.
+* (added; backlog criteria 2, 3) On a page with a rotated view an object ends where dropped, with the dragged size. Test: e2e, rotated one-page sample, saved file rendered by PDFium.
+* (added; practice (Acrobat keeps an annotation within its page)) A moved or resized object stays on its page: a drag stops at the page edge. (changes upstream behaviour) Test: e2e, square, ink and an added image dragged past the edge.
+* (added; project rule "never lose work silently") Resizing a text box whose text the editor cannot redraw is refused with the editor's text and nothing changes; moving it works. (a stated exception of backlog criterion 5) Test: fork test, text box from another program with text no standard font draws.
 
 ### Feature: Kept markup
 
@@ -508,6 +538,8 @@ Acceptance criteria:
 * Given a document with a note with a reply, one text markup of each type, a text box, an ink drawing, a shape, an added image, a link and a corrected paragraph, when the fork's save returns the bytes and those bytes are opened in the editor again, then each of them is present on the same page with the same position, size, text and target.
 * Given the reopened bytes, when the reviewer selects a placed object, then it can be moved and resized as stated in "Move and resize a placed object"; the text markup stays on its text passage.
 * Given the reopened bytes, when the reviewer selects a markup item, then its explanation can be added or changed as stated in "Add or change the explanation of a markup item"; an added image has no explanation of its own and is explained by a note on or next to it, as "Place an image on a page" defines.
+* (added; backlog criteria 1 and 3) A second save with no edit between returns the same objects (none twice); a save after one more edit holds all earlier objects and the new one once. Test: e2e, the full document of criterion 1.
+* (added; those criteria) Backlog criteria 2 and 3 are tested on the reopened bytes: one object of each placed type is moved and one resized, text markup stays on its passage, and an explanation is added to one item and changed on another. Test: e2e, saved then reopened full document.
 
 ## Epic: Keep markup with its page
 
@@ -523,6 +555,10 @@ Acceptance criteria:
 * Given markup items on pages 1 and 2, when the reviewer deletes page 1 ("Delete selected pages"), then the markup items of page 1 are gone from the document and from the comments panel. The markup items of page 2 remain on that page, now page 1.
 * Given a markup item on page 1, when the reviewer inserts a blank page before page 1 ("Insert blank pages"), then the markup item is on its original page, now page 2, and the inserted page has no markup.
 * Given a deleted page that had markup, when the reviewer undoes the deletion ("Undo and redo page changes"), then the page returns with its markup items at their earlier places.
+* (added; practice (Acrobat keeps comments of inserted pages); sibling "Insert pages from another PDF" is silent on markup (the editor already does this). An addition for the owner to confirm) Pages inserted from another PDF keep their markup at the same place with author and text; the document's own markup stays put. Test: e2e, two-page file plus the markup sample.
+* (added; "Undo and redo page changes") Undo of a page move, of a blank-page insertion and of an insertion from another PDF puts the markup back with its page, and redo applies the change again. Test: e2e, three-page markup sample.
+* (added; "List all markup in the comments panel") After each page change the comments panel has no entry for markup of a deleted page and none for an inserted blank page, and choosing an entry brings the page that now carries it into view. Test: e2e, three-page markup sample.
+* (added; backlog criterion 3 as written (not bounded by what the editor does today)) A blank page can be inserted before page 1 and the markup then sits on its original page, now page 2. Test: e2e, markup sample.
 
 ## Epic: Review all markup in one place
 
@@ -788,6 +824,11 @@ The fork's save returns bytes in which every annotation of the kinds the editor 
 Acceptance criteria:
 * Given a document containing one annotation of each kind the editor builds (a note, a text markup, a shape, an ink drawing and a text box), when the bytes are obtained through "Save and return the bytes to the client", then each of these annotations in the bytes has an appearance stream.
 * Given those bytes are opened in a PDF reader that is not Workspace, then each annotation is shown on the same page and at the same position as in the editor.
+* (added; backlog criterion 1) Every annotation made with each tool and command of the offered markup list has an appearance in the saved file. Test: e2e, one of each.
+* (added; "Reply to a PDF file comment" (no card, no icon); "Results show the same in other PDF readers") A reply shows no second note icon in another reader. Test: e2e, note with two replies.
+* (added; backlog criterion 2) An annotation moved, resized or reshaped, or whose text or colour was changed after creation, shows in another reader as in the editor and not as before. Test: e2e, square, ink, text box, line, polygon, note.
+* (added; practice (highlights are see-through); "Results show the same in other PDF readers") A saved highlight does not hide its text; underline, squiggly and strike out cover none of it. Test: e2e, text sample.
+* (added; backlog criterion 2) A deleted markup item leaves nothing visible in another reader. Test: e2e, any item deleted.
 
 ## Epic: Control who may read and change documents
 
@@ -803,6 +844,12 @@ Acceptance criteria:
 * Workspace does not offer an action that the PDF file permissions forbid.
 * Given an encrypted document is open in the editor and has been edited, when "Save and return the bytes to the client" returns the bytes, then the saved document stays encrypted as the document was.
 * Workspace opens password-protected documents as "Enter a password for a protected document" defines.
+* (added; backlog criterion 1 ("a document whose author restricted it"); the permissions list of `fork/changes/host-api.md`) The notice about restrictions is shown for every document opened without the owner password that restricts any right the state reports (printing, modifying, copying, annotating, form filling, accessibility extraction, assembly, high-quality printing); not for an unrestricted document, nor after the owner password was entered. (changes upstream behaviour: today only modification or assembly) Test: e2e, samples with one right cleared each, and unrestricted ones; fork test.
+* (added; backlog criterion 1; "Hide upstream interface parts Workspace does not offer" (no Preferences)) The notice cannot be turned off for good: no "Don't show again", and it shows each time a restricted document is opened. (changes upstream behaviour) Test: e2e, two restricted documents.
+* (added; backlog criterion 1; rule of earlier items) Every offered command that needs a right the document does not give is refused with "is not available now" and changes nothing. Test: e2e, one sweep, samples with each right cleared.
+* (added; backlog criterion 1) With copying forbidden, copying selected text puts nothing on the clipboard and shows the refusal; with it allowed it copies. Test: e2e, text sample protected twice.
+* (added; backlog criterion 3) An encrypted document saved after an edit stays encrypted as it was, with the same permissions, and opens with the same passwords in another named reader (PDFium);  Test: e2e, encrypted markup sample.
+* (added; hosting "State the client reads"; backlog criterion 2) A client reading the state can tell each right; after upload of a restricted document the state reports exactly the cleared right as false. Test: e2e, four single-right samples (kept only where "Report editor state to the client" tests lack them); the stand-in client's buttons follow it (Workspace's real buttons are Workspace's).
 
 ## Epic: Keep a maintained editor
 
@@ -914,6 +961,18 @@ Acceptance criteria:
 * The editor gives the client saved bytes only through this function: it starts no download of the saved document and sends no other save message (`pdfcraft:save`). The print-ready PDF that "Print the document" downloads when the browser refuses the print is not the saved document.
 * Every criterion of this item is tested end to end in the Mock/Stub, with the function called on a page opened without `?control`.
 
+#### Story: Save without earlier revisions
+
+Component: Workspace and PdfCraft fork
+
+As a user, I want to choose, when saving, that the PDF file is written in full without its earlier revisions, so that text I replaced and pages I deleted cannot be recovered from the saved file.
+Acceptance criteria:
+* When the user saves (Save, Save as a Version, Save as new Item, Download as PDF), Workspace offers an option to write the file in full; it is off by default.
+* Given the option is off, the file is saved incrementally, as today.
+* Given the option is on, the saved PDF file holds no earlier revisions: text replaced and pages deleted before the save cannot be recovered from it.
+* Given the option is on, the saved PDF file shows the same pages, markup and content as an incremental save of the same document.
+* The fork's save ("Save and return the bytes to the client") can return the bytes written in full, without earlier revisions, when the client asks for it.
+
 #### Technical story: Run commands from the client
 
 Component: PdfCraft fork
@@ -997,6 +1056,7 @@ The fork exports a function that sets the editor's interface language, so that W
 Acceptance criteria:
 * The exported JS API has a function that takes a language and sets the editor's interface language to it.
 * After the call, every text the editor shows to the user is shown in that language where the editor has a translation for it.
+* (added; product owner, 2026-11-07, `fork/hosting.md`) The client can also give the language when it starts the editor; the editor shows it from the first thing it shows, without a call. Test: e2e, the language given at start, no call.
 
 #### Technical story: Set the editor's theme
 
@@ -1006,6 +1066,7 @@ The fork exports a function that sets the editor's theme, so that the editor fol
 Acceptance criteria:
 * The exported JS API has a function that takes one of light, dark and follow the system and sets the editor's theme to it.
 * After the call, the editing canvas is shown in that theme.
+* (added; product owner, 2026-11-07, `fork/hosting.md`) The client can also give the theme when it starts the editor; the editor shows it from the first thing it shows, without a call. Test: e2e, the theme given at start, no call.
 
 #### Technical story: Set the author name for markup
 
@@ -1016,6 +1077,7 @@ Acceptance criteria:
 * The exported JS API has a function that takes a display name and sets it as the author name.
 * After the call, every markup item and reply the user creates records that name as its author.
 * The author name cannot be changed inside the editor.
+* (added; product owner, 2026-11-07, `fork/hosting.md`) The client can also give the author name when it starts the editor; the editor uses it from the first markup item, without a call. Test: e2e, the name given at start, no call, then a note.
 
 #### Technical story: Report editor state to the client
 
@@ -1095,6 +1157,16 @@ Acceptance criteria:
 * Given no document is open, the editor shows an empty page area with no actions and no messages; what is opened, and every message about it, is Workspace's.
 * Each tool group the Tools panel shows is used by an action an item of this backlog defines; the change record names that item for each group.
 * Every criterion of this item is tested end to end in the Mock/Stub.
+
+#### Spike: Upstream interface parts Workspace needs
+
+Component: PdfCraft fork
+
+Question: which upstream interface parts (commands, tools, panels) work only in the stand-alone application, and which of the others an item of this backlog needs? It cannot be answered yet: upstream's commands and tools are still being added and discussed. So far the parts that work only in the stand-alone application were hidden; a part still shown is not evidence that an item needs it, and a hidden one is not evidence that none does.
+Acceptance criteria:
+* Delivers, for each upstream command, tool and panel, whether it works only in the stand-alone application.
+* Delivers, for each of the others, the backlog item that needs it, or that no item does.
+* Delivers the parts hidden so far that an item needs, and the parts shown that no item needs.
 
 ## Epic: Change the editor only where Workspace needs it
 

@@ -21,7 +21,7 @@ The first version of this change listed the commands the web build refuses. The 
 ## What it changes
 - `offered(id)` (`crates/ui-egui/src/commands.rs`) is `!wasm32 || OFFERED_ON_THE_WEB.contains(&id)`: in the web build only a listed id is offered; on the desktop every command is. `OFFERED_ON_THE_WEB` replaces `NOT_OFFERED_ON_THE_WEB`, and extends the one `app.preferences` change of [preferences-hidden](/changes/preferences-hidden.md). The constant is grouped by backlog story, each group commented with the story's exact title.
 - Everything the earlier refusal list refused stays refused, because none of it is on the allowlist: Save and Save As; the commands of the stand-alone application (New blank PDF, Create PDF from file, Create PDF from Multiple Files, Open Recent, Clear Recent Files, Pin Folder to Home, Tab Order, and the commands that open, create, close or locate files, manage tabs or quit); Preferences; the theme commands; the commands that only open a hidden panel (`form.fields`, `sign.panel`, `a11y.tags`, `a11y.check`, `a11y.find_untagged`, `doc.compare`, `a11y.autotag`, `form.prepare`, `sign.validate`); the network and upstream links (`help.check_updates`, `help.discord`, `help.github`, `help.website`, `help.app_page`).
-- 46 commands are offered, in the table below.
+- 47 commands are offered, in the table below.
 - Surfaces that follow `offered()`, each checked: menus (`menus.rs`, including the View > Tools submenu and `run_menu_command`, which also serves the native macOS bar), command search (`dialogs/palette.rs`), keyboard shortcuts and their dispatch (`commands.rs`: `registry_shortcuts` filters the registry by `offered`; `dispatch_command`, the shortcuts deferred while a form field has the keyboard, and the menus all end in `execute`, whose `execute_unguarded` returns false for an id that is not offered before anything else runs), the shortcuts list (`dialogs.rs`), the hotbar (`hotbar.rs`: the tool picker, the saved tool buttons and `set_tools`), context menus, the control channel (`control/host.rs`: `ui.command` returns an error and `ui.commands` omits them; `app/control.rs`: `dialog=compare-files`), `PdfCraftApp::run_command` (`app/commands.rs`: no file picker is asked for first, and with no document a tool says "Open a document first" instead of opening a file picker in the web build) and `execute`, which returns false.
 - Follows worker-hide-parts' predicates (`panels.rs`): the View > Side panels submenu skips panels `panel_offered` refuses; the `panel` control option refuses them with an error; command search and the View > Tools submenu skip tool groups `tool_listed` refuses; the page context menu's "Export this PDF" (`canvas.rs`) is not drawn when `tool_listed("export")` is false.
 - The Organize pages toolbar's "Save pages" button (`canvas/organize.rs`) is not drawn, and its queued action (`editing.rs`) saves nothing, where Save is not offered.
@@ -63,13 +63,14 @@ The story is the backlog story or technical story (Component "PdfCraft fork" or 
 | `comment.polyline` | Draw connected lines | Draw a shape around content ("each shape tool the editor provides"; integrator's decision) |
 | `comment.cloud` | Draw a cloud | Draw a shape around content; Move and resize a placed object (names clouds; integrator's decision) |
 | `comment.list` | Comments panel | List all markup in the comments panel |
-| `edit.edit_text` | Edit text & images | Correct wording in a Latin-script paragraph |
+| `edit.edit_text` | Edit text & images | Correct wording in a paragraph |
 | `edit.image` | Add image... | Place an image on a page |
 | `edit.link` | Add or edit links | Add a link over an area of a page |
 | `bookmark.add` | New bookmark | Add a bookmark |
 | `page.organize` | Organize pages | See all pages in the Organize pages view |
 | `page.delete` | Delete pages | Delete selected pages |
 | `page.insert_blank` | Insert blank page | Insert blank pages |
+| `page.insert_blank_before` | Insert blank page before | Insert blank pages |
 | `page.insert` | Insert pages from file... | Insert pages from another PDF |
 | `edit.undo` | Undo | Undo and redo markup changes; Undo and redo page changes |
 | `edit.redo` | Redo | Undo and redo markup changes; Undo and redo page changes |

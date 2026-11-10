@@ -41,7 +41,7 @@ The Tools pane is shown only as far as backlog actions need it. A group is kept 
 |---|---|---|
 | Export a PDF (export) | hidden (product owner) | none |
 | Fill & Sign (fill_sign) | hidden (integrator's decision) | none: "Draw a signature in Workspace" has Component Workspace and draws the signature in Workspace's canvas; "Place the drawn signature image" places it through the exported JS API, not through Fill & Sign or upstream's signature pad |
-| Edit a PDF (edit) | kept | "Correct wording in a Latin-script paragraph", "Place an image on a page", "Add a link over an area of a page", "Insert blank pages", "Insert pages from another PDF", "Delete selected pages", "See all pages in the Organize pages view" |
+| Edit a PDF (edit) | kept | "Correct wording in a paragraph", "Place an image on a page", "Add a link over an area of a page", "Insert blank pages", "Insert pages from another PDF", "Delete selected pages", "See all pages in the Organize pages view" |
 | Create a PDF (create) | hidden (product owner) | none |
 | Combine files (combine) | hidden | none: "Expose Combine to Workspace" reaches Combine through the exported JS API; the editor's own Combine picks files itself, while the client passes in the files to combine ([hosting](/hosting.md)) |
 | Organize pages (organize) | kept | "See all pages in the Organize pages view", "Move pages to a new position", "Delete selected pages", "Undo and redo page changes", "Insert blank pages", "Insert pages from another PDF" |

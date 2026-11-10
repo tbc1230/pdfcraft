@@ -35,7 +35,8 @@ A backlog item names one function of the editor's interface. Workspace uses them
 
 ## Open a document
 - The client passes the complete bytes of a PDF (never a path or URL); the result tells it whether the document opened. A failure carries the editor's error text, which the client shows unchanged.[^mods][^backlog]
-- With a password: "password required" is a result distinct from every other failure; the password goes nowhere but the editor.[^mods]
+- With a password: "password required" is a result distinct from every other failure; the password goes nowhere but the editor.[^mods] The password is asked for by the editor's own password prompt, which to the user is Workspace asking (product owner, 2026-11-10).
+- Open point: the other failure causes (not a PDF or unreadable, over 512 MiB, a file passed as a `File` instead of bytes) are not yet returned to the client; they belong to "Open a document from bytes", which is deferred, and "Report why a document could not be opened" waits for it (product owner, 2026-11-10).
 - Given a document is open and opening another one fails, the open document stays open and unchanged.[^backlog]
 - The editor shows no tab strip and no home screen; which document is open is the client's choice.[^mods]
 
@@ -57,8 +58,8 @@ A backlog item names one function of the editor's interface. Workspace uses them
 
 ## Today's build
 The library build with this API is deferred until Workspace's stack is decided (product owner, 2026-11-09).[^plan] The editor is upstream's web build `apps/pdfcraft-web`, hosted by the Mock/Stub:
-- `data-host="page"` on the canvas `pdfcraft`, with CustomEvents on it: `pdfcraft:ready`, `pdfcraft:open` (the page sends `{ name, bytes }`), `pdfcraft:dirty`, `pdfcraft:failed`, and the fork's `pdfcraft:state` (the editor state, each time it changes). `pdfcraft:save` is sent only by the editor's own Save, which the web build no longer offers.
-- The fork's functions on `window.pdfcraft`, present on every page: `setLanguage`, `setTheme`, `setAuthor` (also given at start as `data-language`, `data-theme`, `data-author` on the canvas), `save()`, `runCommand(id)` and `getState()` ([Host API](/changes/host-api.md)).
+- `data-host="page"` on the canvas `pdfcraft`, with CustomEvents on it: `pdfcraft:ready`, `pdfcraft:open` (the page sends `{ name, bytes }`), `pdfcraft:dirty`, `pdfcraft:failed`, and the fork's `pdfcraft:state` (the editor state, each time it changes) and `pdfcraft:open-failed` (`{ name, cause: "password-required", error }` when the user cancels the password prompt of a file the page sent; `cause` leaves room for the other causes of the open point above). `pdfcraft:save` is sent only by the editor's own Save, which the web build no longer offers.
+- The fork's functions on `window.pdfcraft`, present on every page: `setLanguage`, `setTheme`, `setAuthor` (also given at start as `data-language`, `data-theme`, `data-author` on the canvas), `save()`, `runCommand(id)`, `getState()`, `insertPages(bytes, { name?, password? })` and `placeImage(bytes, { name? })`, which places an image the client passes (the drawn signature, a generated code); `placeSignature(bytes)` is kept for compatibility as `placeImage` without options (product owner, 2026-11-10) ([Host API](/changes/host-api.md)).
 - Upstream's page command API on `window.pdfcraft` (`apps/pdfcraft-web/src/api.rs`: `execute`, `docInspect`, `uiInspect` and the others), present only when the page is opened with `?control`; the Mock/Stub's tests use it to inspect the editor, and the client does not need it.
 
 Where today's build cannot do what this page describes, that is the gap the backlog items close.

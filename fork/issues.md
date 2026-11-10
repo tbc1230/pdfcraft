@@ -47,7 +47,7 @@ The backlog has one document open in the editor at a time; opening another docum
 The e2e tests in `workspace/tests/` open one document per page and do not cover opening a second document.
 
 ### Status
-Open, partly fixed. The fork change `host-open-shown` (`fork/changes/host-open-shown.md`, in the working tree, not committed) shows each document the page opens; its e2e test in `workspace/tests/test_fork_functions_e2e.py` passed on 2026-11-07. Still open: the previous document is not replaced; it stays open in a tab that is not shown, so opening another document does not replace it as the backlog has it. The e2e test checks only which document is shown.
+Confirmed, partly fixed, held. The fork change `host-open-shown` (`fork/changes/host-open-shown.md`, committed in `f706da14`) shows each document the page opens; its e2e test passed. Still open: the previous document is not replaced; it stays open in a tab that is not shown. Held by the product owner (2026-11-08): opening several documents is a planned upstream feature (upstream has pull requests for it), so the fork does not work on it.
 
 ## 2. The mouse wheel does not scroll the document until it is clicked
 
@@ -275,3 +275,153 @@ The "Add a reply" field on a markup item's card has no accessible name: its hint
 
 ### Status
 Opened, 2026-11-09, by the integrating session. Not confirmed.
+
+
+## 11. The Tools panel shows tools that no backlog item uses
+
+- Found: 2026-11-10, by the product owner's session, in `fork/changes/interface-parts-hidden.md` (listed by the integrating session's worker in `.claude/recovered-tests.md`).
+- Component: PdfCraft fork (the Tools panel).
+
+### Observed
+The record states that the kept tool groups still show tools no item of the backlog needs, "(still shown, a decision of the product owner could hide them one by one)": Edit a PDF: Rotate pages, Extract pages, Text, Header and footer, Watermark, Bates numbering, Background, Attach file; Organize pages: Rotate, Extract, Replace, Split, Set page boxes, Crop pages, Duplicate pages, Reverse pages, Page labels, Page transitions; Add comments: Cloud, Stamp, Flatten comments; Redact a PDF: Redact pages, Find text and redact, Set properties, Sanitize document. Not yet seen in the Mock/Stub by this session.
+
+### Steps
+1. Open a document in the Mock/Stub and open the Tools panel.
+2. Open each of the groups Edit a PDF, Organize pages, Add comments and Redact a PDF and compare the tools shown with the actions the backlog items define.
+
+### Backlog
+- "Hide upstream interface parts Workspace does not offer": "The Tools and Inspector panels are shown only as far as actions that items of this backlog define need them." The criterion already decides it; the tests check the groups, not the tools inside them.
+
+### Status
+Opened, 2026-11-10, by the product owner's session. Rejected, 2026-11-10, by the product owner: the issue was opened from the record's list without checking it against the backlog; the backlog has items for watermarks ("Apply an organisation watermark to pages") and for redaction and sanitizing, and what was hidden are the parts that work only in the stand-alone application.
+
+
+## 12. Save as a Version writes over the current version's file
+
+- Found: 2026-11-10, by the product owner, in the Mock/Stub.
+- Component: not known yet: Workspace (the Mock/Stub client or backend) or the PdfCraft fork.
+
+### Observed
+Save as a Version writes the saved bytes into the file of the current version, when it should store them only as a new version and leave the current version's file as it was.
+
+### Steps
+1. Open a stored document in the Mock/Stub and make an edit.
+2. Choose Save as a Version.
+3. Compare the current version's file before and after the save.
+
+### Backlog
+- "Save as a Version": "Given the user chooses Save as a Version, then the state of the document is stored as a new version of the document, as "Keep versions of documents" defines."
+- "Save and return the bytes to the client": Save "overwrites the current version"; Save as a Version is a separate button that obtains the bytes through the same function.
+
+### Status
+Opened and confirmed, 2026-11-10, by the product owner's observation. Where the fault lies, in Workspace (the Mock/Stub) or in the fork, is to be found, in the fork as well.
+
+
+## 13. A refusal tells the user to set a build option
+
+- Found: 2026-11-10, by the integrating session, while building batch 4 ("Correct wording in a paragraph").
+- Component: PdfCraft fork (the editor's text refusals).
+
+### Observed
+When no font can draw a typed character, the refusal advises "use an official release ... (to build them in, set CRAFT_FONTS_DIR to a craft-fonts checkout)". A Workspace user cannot set a build option. The same advice is in other refusals for Arabic, Hebrew, Japanese and Thai text.
+
+### Steps
+1. In the Mock/Stub, correct a word in a paragraph and type a character no font draws (an emoji).
+2. Apply: read the notice.
+
+### Cause
+The texts are in `crates/edit/src/text/fallback.rs` (about lines 283-335), `crates/edit/src/text/arabic.rs` line 66 and `crates/edit/src/added/layout.rs` lines 267, 277, 287. Whether they are upstream's or the fork's is not checked.
+
+### Backlog
+- "Correct wording in a paragraph": a character no font can draw is refused and "the user is told why".
+
+### Status
+Opened, 2026-11-10, by the product owner's session from the integrating session's record. Not confirmed.
+
+
+## 14. Another reader reads a corrected Arabic word with its letters reversed
+
+- Found: 2026-11-10, by the integrating session's e2e worker, while testing "Correct wording in a paragraph" (batch 4).
+- Component: PdfCraft fork (corrected Arabic text in the saved file).
+
+### Observed
+After an Arabic word is corrected and saved, PDFium can read the word with its letters in reverse order. The e2e helper `has_word` (`workspace/tests/test_item_correct_wording.py`) accepts either order, so the tests pass either way. The editor's own Find reads it correctly.
+
+### Steps
+1. Correct a word in an Arabic paragraph in the Mock/Stub and save.
+2. Extract the page text of the saved bytes with PDFium and compare the word with the one typed.
+
+### Cause
+`fork/changes/paragraph-correction.md`: the corrected Arabic text is written as Type 3 glyphs from the craft-fonts face (a variable font that cannot be embedded), inside an /ActualText span holding the line as typed. Whether PDFium and other readers use /ActualText for text extraction, copying and search is not checked.
+
+### Backlog
+- "Correct wording in a paragraph": the replaced word is gone from the page text and the corrected word is in it.
+
+### Status
+Opened, 2026-11-10, by the product owner's session from the integrating session's record. Not confirmed.
+
+
+## 15. Control+Enter pressed within one frame is not always seen
+
+- Found: 2026-11-10, by the integrating session's e2e worker, while testing "Correct wording in a paragraph" (batch 4).
+- Component: PdfCraft fork (keyboard input in the WASM editor).
+
+### Observed
+A Control+Enter that was over within one frame was not always seen: the French draft stayed open. The test helper `press_ctrl_enter` (`workspace/tests/fixtures_text.py`) now holds Control for 150 ms before and after Enter. Other e2e files press Control+Enter without a hold and pass.
+
+### Steps
+1. Open a paragraph for correction in the Mock/Stub and type a change.
+2. Press Control+Enter quickly, releasing Control in the same frame as Enter.
+
+### Cause
+Not found. Issue 4 has the same pattern for Control+Page Down and was rejected as not reproduced with browser key events.
+
+### Backlog
+- "Correct wording in a paragraph" (applying a correction).
+
+### Status
+Opened, 2026-11-10, by the product owner's session from the integrating session's record. Not confirmed: an input issue needs the product owner's real keyboard.
+
+
+## 16. The French interface font lacks a character of the French texts
+
+- Found: 2026-11-09, by the integrating session (fork tests, batch 3), seen again in batch 4.
+- Component: PdfCraft fork (interface fonts and the French catalogue).
+
+### Observed
+The fork test `fonts::primary_ui_fonts_cover_latin_and_cyrillic_catalogs` fails with "fr: Inter lacks" the triangle U+25B8: a French text uses a character the primary interface font cannot draw. The fork test `comments::hotbar_picker_searches_translated_tool_labels` also fails with the French catalogue. Both fail on the batch 3 commit `d255813c` too.
+
+### Steps
+1. Run the two fork tests with craft-i18n and craft-fonts.
+2. In the Mock/Stub, set the language to French and look for the text that holds U+25B8.
+
+### Cause
+Not found: the test, the catalogue (local craft-i18n checkout) or the font.
+
+### Backlog
+- "Set the interface language of the editor": every text is shown in the language where the editor has a translation.
+
+### Status
+Opened, 2026-11-10, by the product owner's session from the integrating session's record. Not confirmed.
+
+
+## 17. A note's pop-up and an arrow's or cloud's box can lie partly outside the page
+
+- Found: 2026-11-10, by the integrating session's e2e workers, while testing "Move and resize a placed object" (batch 4).
+- Component: PdfCraft fork (markup geometry).
+
+### Observed
+Noted by the workers, not judged: a new note's pop-up rectangle lies partly below the page; an arrow's or a cloud's box (BBox) can extend past the page.
+
+### Steps
+1. In the Mock/Stub, place a note near the bottom of a page and read its pop-up rectangle in the saved file.
+2. Draw an arrow or a cloud near a page edge and read its box in the saved file.
+
+### Cause
+Not found.
+
+### Backlog
+- "Move and resize a placed object": "A moved or resized object stays on its page: a drag stops at the page edge."
+
+### Status
+Opened, 2026-11-10, by the product owner's session from the integrating session's record. Not confirmed.

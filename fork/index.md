@@ -46,6 +46,13 @@ This folder is the fork's own knowledge, in Open Knowledge Format (OKF) v0.2. Ev
 - [The Print dialog fits the editor area](/changes/print-dialog-fit.md)
 - [Arabic text in a text box is drawn in the Arabic face](/changes/text-box-arabic.md)
 - [The comments panel and menus offer what the criteria allow](/changes/markup-menus.md)
+- [Note pop-up on the page, and rules for moving, resizing and reshaping annotations](/changes/note-popup-and-object-handles.md)
+- [Added images stop at the page edge and ignore a slip](/changes/added-image-handles.md)
+- [A link's page target has a fit, and its web address is checked](/changes/link-targets.md)
+- [The restrictions set inside a PDF are honoured](/changes/restrictions-honoured.md)
+- [Insert a blank page before the selection](/changes/blank-page-before.md)
+- [The host is told when a password prompt is cancelled](/changes/open-password-result.md)
+- [Correcting wording in a paragraph rewraps it, and Arabic is set in the editor's face](/changes/paragraph-correction.md)
 
 ## Upstream documents
 - [README.md](/upstream/readme.md)
