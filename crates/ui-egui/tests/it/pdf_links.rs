@@ -3,7 +3,7 @@
 use egui::Pos2;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use pdfcraft_engine::LinkAction;
+use pdfcraft_engine::{LinkAction, LinkFit};
 use pdfcraft_ui_egui::{Dialog, PdfCraftApp};
 
 fn harness() -> Harness<'static, PdfCraftApp> {
@@ -73,11 +73,11 @@ fn drawing_editing_and_deleting_links() {
     {
         let d = h.state_mut().link_draft.as_mut().unwrap();
         d.web = false;
-        d.target = 1;
+        d.target = "1".into();
     }
     h.get_by_label("OK").click();
     h.run_steps(3);
-    assert_eq!(links(&h)[0].action, LinkAction::Page(0));
+    assert_eq!(links(&h)[0].action, LinkAction::Page { page: 0, fit: LinkFit::Page });
     // Delete the selected link.
     h.key_press(egui::Key::Delete);
     h.run_steps(3);
@@ -181,4 +181,33 @@ trailer << /Root 1 0 R >>
     assert_eq!(h.state().views[0].current, 2, "the link goes to page 3");
     assert_eq!(h.state().views[0].zoom, 2.0, "the destination zoom is applied");
     assert_eq!(state(&h), before, "following a link edits nothing");
+}
+
+#[test]
+fn a_slip_opens_no_dialog_cancel_adds_nothing_and_ok_adds_one_undo_step() {
+    let mut h = harness();
+    assert!(h.state_mut().execute("edit.link"));
+    // A drag of about 1 pt on each side is a slip.
+    let a = at(&h, 40.0, 300.0);
+    let b = at(&h, 41.0, 301.0);
+    drag(&mut h, a, b);
+    assert_eq!(h.state().dialog, None, "a slip opens no dialog");
+    assert!(links(&h).is_empty());
+    // Cancel adds nothing.
+    let (from, to) = (at(&h, 40.0, 300.0), at(&h, 160.0, 320.0));
+    drag(&mut h, from, to);
+    assert_eq!(h.state().dialog, Some(Dialog::LinkProps));
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert!(links(&h).is_empty());
+    // OK adds one link as one undo step.
+    let (from, to) = (at(&h, 40.0, 300.0), at(&h, 160.0, 320.0));
+    drag(&mut h, from, to);
+    h.state_mut().link_draft.as_mut().unwrap().url = "https://example.org".into();
+    h.get_by_label("OK").click();
+    h.run_steps(3);
+    assert_eq!(links(&h).len(), 1);
+    h.state_mut().undo();
+    h.run_steps(3);
+    assert!(links(&h).is_empty(), "one undo removes it");
 }

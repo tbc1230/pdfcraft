@@ -302,6 +302,62 @@ fn selected_text_copy_floating_button_honours_permissions() {
     }
 }
 
+/// With copying forbidden, copying the selected text puts nothing on the clipboard and shows the
+/// refusal; with it allowed, it copies. The same text protected twice (user and owner password).
+#[test]
+fn copying_forbidden_puts_nothing_on_the_clipboard_and_shows_the_refusal() {
+    const TEXT: &str = "The quick brown fox\njumps over the dog";
+    for (password, allowed) in [("pw", false), ("owner", true)] {
+        let mut doc = pdfcraft_cos::Document::open(std::sync::Arc::new(two_lines())).unwrap();
+        doc.set_encryption(&pdfcraft_cos::NewEncryption {
+            algorithm: pdfcraft_cos::Algorithm::Aes256,
+            user_password: "pw",
+            owner_password: "owner",
+            permissions: -1 ^ 0b1_0000,
+            encrypt_metadata: true,
+            seed: [4; 32],
+        })
+        .unwrap();
+        let bytes = pdfcraft_cos::write_full(&doc, &Default::default()).unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", "en").unwrap();
+            app.open_bytes("no-copy.pdf", None, bytes).unwrap();
+            app.submit_password(Some(password.into()));
+            app.set_option("left", "closed").unwrap();
+            app.system_clipboard = false;
+            app
+        });
+        let mut loaded = false;
+        for _ in 0..200 {
+            h.run_steps(2);
+            if h.state_mut().views[0].select_all() {
+                loaded = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(loaded);
+        h.run_steps(2);
+        h.state_mut().toast = None;
+        let ran = h.state_mut().execute("edit.copy");
+        let said = h.state().toast.as_ref().map(|t| t.0.clone());
+        let mut put = false;
+        let mut put_anything = false;
+        for _ in 0..4 {
+            h.step();
+            put |= copied(&h, TEXT);
+            put_anything |= h.output().platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(_)));
+        }
+        assert_eq!(ran, allowed, "{password}");
+        assert_eq!(put, allowed, "{password}: the text reaches the clipboard only when copying is allowed");
+        if !allowed {
+            assert!(!put_anything, "nothing at all reaches the clipboard");
+            assert_eq!(said.as_deref(), Some("The document's security settings don't allow copying text and images"));
+        }
+    }
+}
+
 /// What the stand-in for the system clipboard was given: `(html, plain text)` per copy.
 type HtmlSets = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
 

@@ -1,4 +1,6 @@
-use super::geometry::{HANDLES, handle_pos, held, is_markup, reaches_points, reshapable, reshaped, resizable};
+use super::geometry::{
+    HANDLES, POPUP_BAR, clamp_to, handle_pos, held, is_markup, popup_close_rect, reaches_points, reshapable, reshaped, resizable, slide_within,
+};
 use super::state::{CommentView, Gesture, PageCx, SETTLE_SECS};
 use super::{
     Annotation, Color32, CommentTool, CornerRadius, DocInfo, DocView, Edit, LineEnding, NewAnnotation, Pos2, QuickTool, Rect, SELECT_BLUE, Shape,
@@ -14,6 +16,60 @@ pub(super) fn hover_outline<'c>(cx: &'c PageCx<'_>, cv: &CommentView, hover: Opt
     let Some(Owner::Comment { index, part: CommentPart::Body }) = hover.map(|h| h.owner) else { return None };
     let tool_outlines = matches!(cx.tool, QuickTool::Select | QuickTool::Fill(_));
     (cv.gesture.is_none() && tool_outlines && cv.selected != Some((cx.page, index))).then(|| cx.get(index)).flatten()
+}
+
+/// An opened note's pop-up as Acrobat shows it: a title bar (the author, the date and a close
+/// control) and the note's text, on the page at its `/Popup /Rect`.
+fn paint_popups(painter: &egui::Painter, cx: &PageCx<'_>, view: &DocView) {
+    let cv = &view.comments;
+    for a in cx.open_popups() {
+        let Some(r) = cx.popup_screen_rect(a, cv.gesture.as_ref(), cx.ptr.pos, view.pending_edit.as_ref()) else { continue };
+        let tint = color32(a.color.map_or([1.0, 0.94, 0.0], |c| c.map(f64::from)));
+        let [tr, tg, tb, _] = tint.to_array();
+        let wash = |k: f32| Color32::from_rgb(lighten(tr, k), lighten(tg, k), lighten(tb, k));
+        let selected = cv.is_selected((cx.page, a.index));
+        let outline = if selected { SELECT_BLUE } else { Color32::from_gray(0x80) };
+        painter.rect_filled(r.translate(vec2(2.0, 2.0)), CornerRadius::ZERO, Color32::from_black_alpha(40));
+        painter.rect_filled(r, CornerRadius::ZERO, wash(0.18));
+        let bar = egui::Rect::from_min_size(r.min, vec2(r.width(), POPUP_BAR.min(r.height())));
+        painter.rect_filled(bar, CornerRadius::ZERO, tint);
+        painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(1.0, outline), egui::StrokeKind::Middle);
+        let ink = Color32::from_gray(0x22);
+        let who = a.author.clone().unwrap_or_default();
+        let title = match a.modified.as_deref().filter(|m| !m.is_empty()) {
+            Some(date) if who.is_empty() => date.to_owned(),
+            Some(date) => format!("{who}  {date}"),
+            None => who,
+        };
+        let close = popup_close_rect(r);
+        let titles = painter
+            .with_clip_rect(egui::Rect::from_min_max(bar.min, pos2((close.left() - 2.0).max(bar.left()), bar.max.y)).intersect(painter.clip_rect()));
+        titles.text(bar.left_center() + vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, title, crate::theme::semibold(11.5), ink);
+        // A close control that does nothing (no permission, or a locked note) is drawn faint.
+        let live = cx.allowed && !a.locked;
+        let x = Stroke::new(1.5, if live { ink } else { ink.gamma_multiply(0.4) });
+        let c = close.shrink(4.0);
+        painter.line_segment([c.left_top(), c.right_bottom()], x);
+        painter.line_segment([c.right_top(), c.left_bottom()], x);
+        let body = egui::Rect::from_min_max(pos2(r.left(), bar.bottom()), r.max);
+        if body.height() > 2.0 {
+            let text = a.contents.clone().unwrap_or_default();
+            let galley = painter.layout(text, crate::theme::regular(12.0), ink, (body.width() - 12.0).max(1.0));
+            painter.with_clip_rect(body.shrink(1.0).intersect(painter.clip_rect())).galley(body.min + vec2(6.0, 4.0), galley, ink);
+        }
+        // Grips of the corners, so the size can be seen to change.
+        if live {
+            let g = r.right_bottom();
+            for k in [4.0, 8.0] {
+                painter.line_segment([g + vec2(-k, -1.0), g + vec2(-1.0, -k)], Stroke::new(1.0, outline));
+            }
+        }
+    }
+}
+
+/// `v` (0-255) mixed with white, `k` of `v`.
+fn lighten(v: u8, k: f32) -> u8 {
+    (255.0 - (255.0 - f32::from(v)) * k).clamp(0.0, 255.0) as u8
 }
 
 /// Paint comment selection, hover and gesture previews on a page. `hover` is the top hit under the
@@ -110,6 +166,14 @@ pub(super) fn changing_points(
 
 fn paint_points(painter: &egui::Painter, cx: &PageCx<'_>, view: &DocView, a: &Annotation, pointer: Option<Pos2>, shift: bool) {
     let cv = &view.comments;
+    // The shape stops at the page edge while it is dragged, as it will when released.
+    let pointer = pointer.map(|p| match cv.gesture.as_ref() {
+        Some(Gesture::Move { page, index, from }) if (*page, *index) == (cx.page, a.index) => {
+            *from + slide_within(cx.screen_rect(a), p - *from, cx.xf.rect)
+        }
+        Some(Gesture::Reshape { page, index, .. }) if (*page, *index) == (cx.page, a.index) => clamp_to(cx.xf.rect, p),
+        _ => p,
+    });
     let points: Vec<[f64; 2]> = a.points.iter().map(|q| [f64::from(q[0]), f64::from(q[1])]).collect();
     let changing = changing_points(cv.gesture.as_ref(), view.pending_edit.as_ref(), (cx.page, a.index), &points, |p| cx.to_user(p), pointer, shift);
     let changed = changing.is_some();
@@ -130,6 +194,12 @@ fn paint_points(painter: &egui::Painter, cx: &PageCx<'_>, view: &DocView, a: &An
 }
 
 fn paint_gesture(painter: &egui::Painter, cx: &PageCx<'_>, view: &DocView) {
+    paint_gesture_shapes(painter, cx, view);
+    // Opened notes' pop-ups lie over everything else on the page.
+    paint_popups(painter, cx, view);
+}
+
+fn paint_gesture_shapes(painter: &egui::Painter, cx: &PageCx<'_>, view: &DocView) {
     let now = painter.ctx().input(|i| i.time);
     for s in view.comments.settling.iter().filter(|s| s.page == cx.page && now - s.since < SETTLE_SECS) {
         paint_draw(painter, cx, &s.tool, &s.points);

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::geometry::{corner_ratio, is_markup, resized};
+use super::geometry::{POPUP_MIN_PT, at_least, clamp_to, corner_ratio, fit_within, is_markup, resized, slide_within};
 use super::{Annotation, CommentPrefs, CommentTool, DocInfo, Edit, PagePointer, PageXform, Pos2, QuickTool, Rect};
 
 /// The user's login name, which Acrobat uses as the default comment author.
@@ -29,6 +29,10 @@ pub enum Gesture {
     /// Dragging point `point` of a line, connected lines, a polygon or a cloud (its `points`
     /// before the drag, in user space) to where the pointer is.
     Reshape { page: usize, index: usize, point: usize, points: Vec<[f64; 2]> },
+    /// Moving an opened note's pop-up by its title bar, from the press position on screen.
+    PopupMove { page: usize, index: usize, from: Pos2 },
+    /// Resizing an opened note's pop-up by an edge or corner (as [`Gesture::Resize`]).
+    PopupResize { page: usize, index: usize, handle: (i8, i8), from: Pos2 },
     /// Copied comments hanging on the pointer as one bundle (their box `bounds` in user space,
     /// `count` of them, their `outlines` drawn along so the drop can be aimed): a click puts
     /// their centre there, on the page clicked; Escape or a right-click lets them go.
@@ -487,11 +491,51 @@ impl PageCx<'_> {
             return self.xf.user_rect(self.info, self.page, [r[0] + *dx as f32, r[1] + *dy as f32, r[2] + *dx as f32, r[3] + *dy as f32]);
         }
         match (gesture, pointer) {
-            (Some(Gesture::Move { page, index, from }), Some(p)) if (*page, *index) == (self.page, a.index) => r.translate(p - *from),
+            (Some(Gesture::Move { page, index, from }), Some(p)) if (*page, *index) == (self.page, a.index) => {
+                r.translate(slide_within(r, p - *from, self.xf.rect))
+            }
             (Some(Gesture::Resize { page, index, handle, from, aspect_ratio }), Some(p)) if (*page, *index) == (self.page, a.index) => {
-                resized(r, *handle, p - *from, corner_ratio(r, *aspect_ratio, shift))
+                self.resize_preview(r, *handle, *from, p, corner_ratio(r, *aspect_ratio, shift))
             }
             _ => r,
         }
+    }
+
+    /// `r` resized by `handle`, the pointer having gone from `from` to `p`, kept on the page: what
+    /// the live image shows and what the release makes.
+    pub(crate) fn resize_preview(&self, r: Rect, handle: (i8, i8), from: Pos2, p: Pos2, ratio: Option<f32>) -> Rect {
+        let to = clamp_to(self.xf.rect, p);
+        fit_within(resized(r, handle, to - from, ratio), handle, self.xf.rect, ratio)
+    }
+
+    /// The pop-up of note `a` as shown, when it is open: its rectangle on screen, with a pop-up
+    /// gesture or the edit just released applied, and moved along with the note while the note
+    /// itself is dragged. `None` for anything but a note whose pop-up is open.
+    pub(crate) fn popup_screen_rect(&self, a: &Annotation, gesture: Option<&Gesture>, pointer: Option<Pos2>, pending: Option<&Edit>) -> Option<Rect> {
+        let (rect, _) = a.popup.filter(|(_, open)| *open)?;
+        let r = self.xf.user_rect(self.info, self.page, rect);
+        let mine = |page: &usize, index: &usize| (*page, *index) == (self.page, a.index);
+        if let Some(Edit::SetNotePopup { page, index, rect: Some(to), .. }) = pending
+            && mine(page, index)
+        {
+            return Some(self.xf.user_rect_f64(self.info, self.page, *to));
+        }
+        let min = POPUP_MIN_PT * self.xf.zoom();
+        Some(match (gesture, pointer) {
+            (Some(Gesture::PopupMove { page, index, from }), Some(p)) if mine(page, index) => r.translate(slide_within(r, p - *from, self.xf.rect)),
+            (Some(Gesture::PopupResize { page, index, handle, from }), Some(p)) if mine(page, index) => {
+                at_least(self.resize_preview(r, *handle, *from, p, None), *handle, min)
+            }
+            (Some(Gesture::Move { page, index, from }), Some(p)) if mine(page, index) => {
+                let note = self.screen_rect(a);
+                r.translate(slide_within(note, p - *from, self.xf.rect))
+            }
+            _ => r,
+        })
+    }
+
+    /// Notes with an open pop-up on this page, in paint order.
+    pub(crate) fn open_popups(&self) -> impl Iterator<Item = &Annotation> {
+        self.comments().filter(|a| a.subtype == "Text" && a.popup.is_some_and(|(_, open)| open))
     }
 }

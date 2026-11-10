@@ -1,8 +1,9 @@
 use super::create::{
-    add_annotation, base_dict, bounds, callout_attach, ending_draws, ending_pair, finite, grow, ink_bounds, normalize, num_array, rect_for, rgb,
+    add_annotation, add_popup, base_dict, bounds, callout_attach, ending_draws, ending_pair, finite, grow, ink_bounds, normalize, num_array,
+    rect_for, rgb,
 };
 use super::draw::{draw_appearance, redraw_or_restore, set_appearance};
-use super::info::{line_endings_of, text_value};
+use super::info::{default_popup_rect, line_endings_of, text_value};
 use super::lookup::{annot_dict, annot_ref, annotation_flags, annots, page_ref, set_annots};
 use super::types::{
     BorderShape, FLAG_HIDDEN, FLAG_LOCKED, FLAG_NO_ROTATE, FLAG_NO_ZOOM, FLAG_PRINT, LineEnding, Markup, Meta, NewAnnotation, ReviewState, Rgb,
@@ -332,6 +333,53 @@ pub fn set_marked(doc: &mut Document, page: usize, index: usize, marked: bool, a
 }
 
 /// Move a comment (and its pop-up) by `(dx, dy)` points. The appearance moves with `/Rect`.
+/// The least side of a pop-up, in points: smaller, its title bar and close control do not fit.
+pub const MIN_POPUP_SIDE: f64 = 40.0;
+
+/// Open or close a note's pop-up (`/Open` of the note and of its `/Popup`), and with `rect` put the
+/// pop-up there (user space; at least [`MIN_POPUP_SIDE`] each way). A note with no pop-up gets one,
+/// at `rect` or at [`default_popup_rect`](super::info::default_popup_rect), as a new note's. The
+/// note's text, author and date are not touched, so the pop-up shows what the note says; a locked
+/// note keeps its pop-up as it is, and only a note (not a reply) has one.
+pub fn set_popup(doc: &mut Document, page: usize, index: usize, open: bool, rect: Option<[f64; 4]>) -> Result<(), AnnotError> {
+    let (p, r) = annot_ref(doc, page, index)?;
+    unlocked(doc, r)?;
+    let d = annot_dict(doc, r);
+    if d.name(b"Subtype") != Some(b"Text") || d.contains(b"IRT") {
+        return Err(AnnotError::Invalid("only a note has a pop-up".into()));
+    }
+    let rect = match rect.map(normalize) {
+        Some(v) if !finite(&v) || v[2] - v[0] < MIN_POPUP_SIDE || v[3] - v[1] < MIN_POPUP_SIDE => {
+            return Err(AnnotError::Invalid("invalid pop-up rectangle (too small)".into()));
+        }
+        other => other,
+    };
+    let existing = d.reference(b"Popup").filter(|pr| doc.get(*pr).as_dict().is_some_and(|pd| pd.name(b"Subtype") == Some(b"Popup")));
+    let popup = match existing {
+        Some(pr) => pr,
+        None => {
+            let nums: Vec<f64> = d
+                .get(b"Rect")
+                .map(|o| doc.resolve(o))
+                .and_then(|o| o.as_array().map(|a| a.iter().filter_map(|x| doc.resolve(x).as_f64()).collect()))
+                .unwrap_or_default();
+            let note = four(&nums).map(normalize).filter(|v| finite(v)).unwrap_or([0.0; 4]);
+            let mut list = annots(doc, p);
+            add_popup(doc, r, Some(rect.unwrap_or_else(|| default_popup_rect(note))), &mut list)?;
+            set_annots(doc, p, list)?;
+            annot_dict(doc, r).reference(b"Popup").ok_or_else(|| AnnotError::Invalid("the pop-up was not added".into()))?
+        }
+    };
+    doc.update_dict(popup, |pd| {
+        pd.set(b"Open".to_vec(), Object::Bool(open));
+        if let Some(v) = rect {
+            pd.set(b"Rect".to_vec(), num_array(&v));
+        }
+    })?;
+    doc.update_dict(r, |d| d.set(b"Open".to_vec(), Object::Bool(open)))?;
+    Ok(())
+}
+
 pub fn move_annotation(doc: &mut Document, page: usize, index: usize, dx: f64, dy: f64, meta: &Meta) -> Result<(), AnnotError> {
     if !finite(&[dx, dy]) {
         return Err(AnnotError::Invalid("invalid offset".into()));
@@ -1112,4 +1160,213 @@ pub fn erase_ink(doc: &mut Document, page: usize, index: usize, path: &[[f64; 2]
     })?;
     set_appearance(doc, r)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod popup_tests {
+    use std::sync::Arc;
+
+    use pdfcraft_cos::{Document, SaveOptions, write_incremental};
+
+    use crate::lookup::{annot_dict, annots, page_refs};
+    use crate::types::{Meta, NewAnnotation, NoteIcon, Shape, Style};
+    use crate::{Object, add_annotation, add_reply, move_annotation, set_locked, set_points, set_popup, set_rect, summaries};
+
+    /// One 200 x 300 page whose `/Annots` hold the given objects (numbered from 4).
+    fn doc_with(annots: &[&str], extra: &[&str]) -> Document {
+        let refs: Vec<String> = (0..annots.len()).map(|i| format!("{} 0 R", 4 + i)).collect();
+        let mut objs: Vec<String> = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 300] >>".into(),
+            format!("<< /Type /Page /Parent 2 0 R /Annots [{}] >>", refs.join(" ")),
+        ];
+        objs.extend(annots.iter().chain(extra).map(|s| (*s).to_owned()));
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+        for o in offsets {
+            out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+        Document::open(Arc::new(out)).expect("opens")
+    }
+
+    fn reopen(doc: &Document) -> Document {
+        Document::open(Arc::new(write_incremental(doc, &SaveOptions::default()).expect("writes"))).expect("reopens")
+    }
+
+    fn meta() -> Meta {
+        Meta { date: Some("D:20261001120000Z".into()), id: "n".into() }
+    }
+
+    fn new_note(doc: &mut Document) -> usize {
+        let shape = Shape::Note { at: [50.0, 200.0], icon: NoteIcon::Comment };
+        let style = Style::default_for(&shape);
+        add_annotation(doc, &NewAnnotation { page: 0, shape, style, contents: "Hello".into(), author: "Ada".into() }, &meta()).unwrap()
+    }
+
+    fn popup_of(doc: &Document, index: usize) -> (Vec<f64>, bool) {
+        let p = summaries(doc).into_iter().find(|s| s.index == index).and_then(|s| s.popup).expect("a note with a pop-up");
+        (p.0.iter().map(|v| f64::from(*v)).collect(), p.1)
+    }
+
+    #[test]
+    fn a_new_note_has_a_closed_pop_up_and_opening_it_is_saved() {
+        let mut doc = doc_with(&[], &[]);
+        let note = new_note(&mut doc);
+        let (rect, open) = popup_of(&doc, note);
+        assert!(!open);
+        assert_eq!(rect.len(), 4);
+        set_popup(&mut doc, 0, note, true, Some([60.0, 40.0, 190.0, 160.0])).unwrap();
+        assert_eq!(popup_of(&doc, note), (vec![60.0, 40.0, 190.0, 160.0], true));
+        // What a reader of the saved file sees: the note and its pop-up both open, at that place.
+        let saved = reopen(&doc);
+        assert_eq!(popup_of(&saved, note), (vec![60.0, 40.0, 190.0, 160.0], true));
+        let page = page_refs(&saved).unwrap()[0];
+        let d = annot_dict(&saved, annots(&saved, page)[note].as_ref().unwrap());
+        assert!(matches!(d.get(b"Open"), Some(Object::Bool(true))));
+        // Closing keeps the place.
+        set_popup(&mut doc, 0, note, false, None).unwrap();
+        assert_eq!(popup_of(&doc, note), (vec![60.0, 40.0, 190.0, 160.0], false));
+        // The note's text, author and date are not touched.
+        let s = summaries(&doc).into_iter().find(|s| s.index == note).unwrap();
+        assert_eq!((s.contents.as_deref(), s.author.as_deref()), (Some("Hello"), Some("Ada")));
+    }
+
+    #[test]
+    fn a_note_without_a_pop_up_gets_one_when_opened_and_the_other_comments_keep_their_index() {
+        let mut doc = doc_with(
+            &[
+                "<< /Type /Annot /Subtype /Text /Rect [20 200 40 220] /Contents (kept) /T (Bob) /Open true >>",
+                "<< /Type /Annot /Subtype /Square /Rect [100 100 150 150] >>",
+            ],
+            &[],
+        );
+        // Open with no pop-up: shown open at the default place, the note's own /Open.
+        let (rect, open) = popup_of(&doc, 0);
+        assert!(open, "a note whose /Open is true reads as open");
+        assert_eq!(rect, vec![50.0, 100.0, 250.0, 220.0]);
+        set_popup(&mut doc, 0, 0, true, Some([60.0, 100.0, 190.0, 220.0])).unwrap();
+        let page = page_refs(&doc).unwrap()[0];
+        let list = annots(&doc, page);
+        assert_eq!(list.len(), 3, "the pop-up is added at the end, so no index moves");
+        let pop = annot_dict(&doc, list[2].as_ref().unwrap());
+        assert_eq!(pop.name(b"Subtype"), Some(&b"Popup"[..]));
+        assert_eq!(pop.reference(b"Parent"), list[0].as_ref());
+        assert!(matches!(pop.get(b"Open"), Some(Object::Bool(true))));
+        let note = annot_dict(&doc, list[0].as_ref().unwrap());
+        assert_eq!(note.reference(b"Popup"), list[2].as_ref());
+        assert_eq!(popup_of(&doc, 0), (vec![60.0, 100.0, 190.0, 220.0], true));
+        assert!(summaries(&doc).iter().all(|s| s.subtype != "Popup"), "a pop-up is not listed as a comment");
+    }
+
+    #[test]
+    fn only_an_unlocked_note_takes_a_pop_up_of_a_sensible_size() {
+        let mut doc = doc_with(&[], &[]);
+        let note = new_note(&mut doc);
+        assert!(set_popup(&mut doc, 0, note, true, Some([10.0, 10.0, 20.0, 20.0])).is_err(), "too small");
+        assert!(set_popup(&mut doc, 0, note, true, Some([0.0, 0.0, f64::NAN, 100.0])).is_err());
+        assert!(!popup_of(&doc, note).1, "nothing changed");
+        let reply = add_reply(&mut doc, 0, note, "re", "Bob", &meta()).unwrap();
+        assert!(set_popup(&mut doc, 0, reply, true, None).is_err(), "a reply has none");
+        set_locked(&mut doc, 0, note, true).unwrap();
+        assert!(set_popup(&mut doc, 0, note, true, None).is_err(), "a locked note keeps its pop-up");
+        let mut other = doc_with(&["<< /Type /Annot /Subtype /Square /Rect [1 1 50 50] >>"], &[]);
+        assert!(set_popup(&mut other, 0, 0, true, None).is_err(), "only a note has a pop-up");
+    }
+
+    #[test]
+    fn moving_the_note_takes_its_pop_up_along_and_a_move_keeps_the_author() {
+        let mut doc = doc_with(&[], &[]);
+        let note = new_note(&mut doc);
+        set_popup(&mut doc, 0, note, true, Some([60.0, 40.0, 190.0, 160.0])).unwrap();
+        move_annotation(&mut doc, 0, note, 5.0, -10.0, &meta()).unwrap();
+        assert_eq!(popup_of(&doc, note), (vec![65.0, 30.0, 195.0, 150.0], true));
+        let s = summaries(&doc).into_iter().find(|s| s.index == note).unwrap();
+        assert_eq!(s.author.as_deref(), Some("Ada"));
+    }
+
+    #[test]
+    fn a_resize_and_a_reshape_keep_the_author_and_redraw_the_appearance() {
+        let mut doc = doc_with(&[], &[]);
+        let square = |doc: &mut Document, shape| {
+            let style = Style { color: [1.0, 0.0, 0.0], opacity: 1.0, width: 2.0, fill: None, ..Style::default() };
+            add_annotation(doc, &NewAnnotation { page: 0, shape, style, contents: "x".into(), author: "Reviewer".into() }, &meta()).unwrap()
+        };
+        let sq = square(&mut doc, Shape::Rectangle { rect: [20.0, 20.0, 60.0, 60.0] });
+        let line =
+            square(&mut doc, Shape::Line { from: [20.0, 100.0], to: [80.0, 100.0], start: crate::LineEnding::None, end: crate::LineEnding::None });
+        let box_of = |doc: &Document, index: usize| {
+            let page = page_refs(doc).unwrap()[0];
+            let d = annot_dict(doc, annots(doc, page)[index].as_ref().unwrap());
+            let ap = doc.resolve(d.get(b"AP").expect("has /AP")).as_dict().cloned().expect("an /AP dictionary");
+            let n = doc.get(ap.reference(b"N").expect("has /AP /N"));
+            let Object::Stream(s) = &*n else { panic!("not a stream") };
+            let bbox: Vec<f64> = s.dict.get(b"BBox").unwrap().as_array().unwrap().iter().map(|o| o.as_f64().unwrap()).collect();
+            let rect: Vec<f64> = d.get(b"Rect").unwrap().as_array().unwrap().iter().map(|o| o.as_f64().unwrap()).collect();
+            (bbox, rect)
+        };
+        set_rect(&mut doc, 0, sq, [20.0, 20.0, 120.0, 90.0], &meta()).unwrap();
+        let (bbox, rect) = box_of(&doc, sq);
+        assert_eq!(rect, vec![20.0, 20.0, 120.0, 90.0]);
+        assert!(bbox[2] - bbox[0] >= 100.0 && bbox[3] - bbox[1] >= 70.0, "the appearance was redrawn for the new size: {bbox:?}");
+        set_points(&mut doc, 0, line, &[[20.0, 100.0], [150.0, 140.0]], &meta()).unwrap();
+        let (bbox, rect) = box_of(&doc, line);
+        assert!(rect[2] >= 150.0 && bbox[2] >= 150.0, "the appearance follows the new end: {bbox:?} {rect:?}");
+        for index in [sq, line] {
+            let s = summaries(&doc).into_iter().find(|s| s.index == index).unwrap();
+            assert_eq!(s.author.as_deref(), Some("Reviewer"));
+        }
+    }
+
+    #[test]
+    fn a_reply_has_an_empty_appearance_so_no_second_icon_shows() {
+        let mut doc = doc_with(&[], &[]);
+        let note = new_note(&mut doc);
+        let reply = add_reply(&mut doc, 0, note, "answer", "Bob", &meta()).unwrap();
+        let again = add_reply(&mut doc, 0, note, "again", "Cy", &meta()).unwrap();
+        let saved = reopen(&doc);
+        let page = page_refs(&saved).unwrap()[0];
+        for index in [reply, again] {
+            let d = annot_dict(&saved, annots(&saved, page)[index].as_ref().unwrap());
+            assert!(d.contains(b"IRT"));
+            let ap = saved.resolve(d.get(b"AP").expect("a reply has /AP")).as_dict().cloned().unwrap();
+            let n = saved.get(ap.reference(b"N").expect("/AP /N"));
+            let Object::Stream(s) = &*n else { panic!("not a stream") };
+            let bbox: Vec<f64> = s.dict.get(b"BBox").unwrap().as_array().unwrap().iter().map(|o| o.as_f64().unwrap()).collect();
+            assert_eq!(bbox, vec![0.0; 4], "an empty form: a reader draws nothing for the reply");
+            assert!(s.decoded().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_text_box_another_program_drew_moves_but_is_not_resized() {
+        // Japanese text, which no standard font draws, with an appearance of its own.
+        let mut doc = doc_with(
+            &[
+                "<< /Type /Annot /Subtype /FreeText /Rect [20 100 120 140] /DA (0 0 0 rg /Helv 12 Tf) /Contents <FEFF65E5672C8A9E> /AP << /N 5 0 R >> >>",
+            ],
+            &["<< /Type /XObject /Subtype /Form /BBox [0 0 100 40] /Length 0 >>\nstream\n\nendstream"],
+        );
+        let was = |doc: &Document| {
+            let page = page_refs(doc).unwrap()[0];
+            annot_dict(doc, annots(doc, page)[0].as_ref().unwrap())
+        };
+        let before = was(&doc);
+        let err = set_rect(&mut doc, 0, 0, [20.0, 100.0, 220.0, 190.0], &meta()).expect_err("the resize is refused");
+        assert!(err.to_string().contains("can't redraw"), "{err}");
+        let rect_of =
+            |d: &pdfcraft_cos::Dict| -> Vec<f64> { d.get(b"Rect").unwrap().as_array().unwrap().iter().map(|o| o.as_f64().unwrap()).collect() };
+        assert_eq!(rect_of(&was(&doc)), rect_of(&before), "nothing changed");
+        move_annotation(&mut doc, 0, 0, 10.0, 10.0, &meta()).unwrap();
+        let moved = was(&doc);
+        let r: Vec<f64> = moved.get(b"Rect").unwrap().as_array().unwrap().iter().map(|o| o.as_f64().unwrap()).collect();
+        assert_eq!(r, vec![30.0, 110.0, 130.0, 150.0]);
+        assert!(moved.get(b"AP").is_some(), "its own appearance is kept, which a reader maps onto the new /Rect");
+    }
 }

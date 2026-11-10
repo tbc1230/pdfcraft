@@ -1,6 +1,6 @@
 use super::geometry::{
-    CARET_SIZE, HANDLES, clamp_to, corner_ratio, drawn_box, handle_pos, held, is_markup, point_handle, reaches_points, reshapable, reshaped,
-    resizable, resized, snapped_caret,
+    CARET_SIZE, HANDLES, POPUP_MIN_PT, PopupPart, SLIP_PT, at_least, clamp_to, corner_ratio, drawn_box, handle_pos, held, is_markup, point_handle,
+    popup_part, reaches_points, reshapable, reshaped, resizable, slide_within, slipped, snapped_caret,
 };
 use super::paint::{closes_at, drawn_shape, edit_anchor, erase, new_comment};
 use super::state::{Composer, ComposerKind, Gesture, PageCx};
@@ -85,7 +85,16 @@ pub(crate) fn page_input(ui: &egui::Ui, resp: &egui::Response, cx: &PageCx<'_>, 
 /// A comment (a Fill & Sign mark included) is being moved, resized or reshaped on `page`: it keeps
 /// the page's frames until its gesture ends.
 pub(crate) fn moving_on(view: &DocView, page: usize) -> bool {
-    matches!(view.comments.gesture, Some(Gesture::Move { page: p, .. } | Gesture::Resize { page: p, .. } | Gesture::Reshape { page: p, .. }) if p == page)
+    matches!(
+        view.comments.gesture,
+        Some(
+            Gesture::Move { page: p, .. }
+                | Gesture::Resize { page: p, .. }
+                | Gesture::Reshape { page: p, .. }
+                | Gesture::PopupMove { page: p, .. }
+                | Gesture::PopupResize { page: p, .. }
+        ) if p == page
+    )
 }
 
 /// What of the comments lies under `p`, for the cursor, the tip and the press: the one hit test
@@ -113,6 +122,32 @@ pub(crate) fn hit(cx: &PageCx<'_>, view: &DocView, p: Pos2, on_link: bool) -> Op
         _ => return None,
     };
     let bodies = matches!(cx.tool, QuickTool::Select | QuickTool::Fill(_));
+    // An opened note's pop-up lies over the page: it takes the press before anything under it.
+    if cx.tool == QuickTool::Select
+        && let Some((a, part)) = cx
+            .open_popups()
+            .filter_map(|a| {
+                let r = cx.popup_screen_rect(a, None, None, view.pending_edit.as_ref())?;
+                Some((a, popup_part(r, p, cx.allowed && !a.locked)?))
+            })
+            .max_by_key(|(a, _)| a.index)
+    {
+        let (layer, icon) = match part {
+            PopupPart::Close => (Layer::Handle, egui::CursorIcon::PointingHand),
+            PopupPart::Bar => (Layer::Handle, egui::CursorIcon::Move),
+            PopupPart::Text => (Layer::Handle, egui::CursorIcon::Default),
+            PopupPart::Edge(x, y) => (
+                Layer::Handle,
+                match (x, y) {
+                    (0, _) => egui::CursorIcon::ResizeVertical,
+                    (_, 0) => egui::CursorIcon::ResizeHorizontal,
+                    (-1, -1) | (1, 1) => egui::CursorIcon::ResizeNwSe,
+                    _ => egui::CursorIcon::ResizeNeSw,
+                },
+            ),
+        };
+        return Some(Hit::new(Owner::Comment { index: a.index, part: part.part() }, layer, icon));
+    }
     if let Some(a) = view.comments.selected.filter(|(page, _)| *page == cx.page).and_then(|(_, i)| cx.get(i)).filter(|a| pick(a) && cx.allowed) {
         if reaches_points(cx.tool)
             && reshapable(a)
@@ -138,7 +173,7 @@ pub(crate) fn hit(cx: &PageCx<'_>, view: &DocView, p: Pos2, on_link: bool) -> Op
         return None;
     }
     let markup = is_markup(&a.subtype);
-    let icon = if cx.allowed && !markup { egui::CursorIcon::Move } else { egui::CursorIcon::PointingHand };
+    let icon = if cx.allowed && !markup && !a.locked { egui::CursorIcon::Move } else { egui::CursorIcon::PointingHand };
     // Text markup does not move: a click selects it, a drag across it selects the text.
     Some(Hit { declines_drag: markup, ..Hit::new(Owner::Comment { index: a.index, part: CommentPart::Body }, layer(a), icon) })
 }
@@ -231,6 +266,28 @@ fn select_input(
         && let (Some((a, part)), Some(o)) = (owner, origin)
     {
         match part {
+            // A note's pop-up: its title bar moves it, an edge or corner resizes it (see
+            // `PopupPart`). A locked note, or a document that forbids commenting, starts nothing.
+            CommentPart::PopupBar | CommentPart::PopupEdge(..) | CommentPart::PopupClose | CommentPart::PopupText => {
+                if !cv.is_selected((cx.page, a.index)) {
+                    cv.select_only((cx.page, a.index));
+                }
+                if cx.allowed && !a.locked {
+                    match PopupPart::of(part) {
+                        Some(PopupPart::Bar) => cv.gesture = Some(Gesture::PopupMove { page: cx.page, index: a.index, from: o }),
+                        Some(PopupPart::Edge(x, y)) => {
+                            cv.gesture = Some(Gesture::PopupResize { page: cx.page, index: a.index, handle: (x, y), from: o });
+                        }
+                        _ => {}
+                    }
+                }
+                consumed = true;
+            }
+            CommentPart::Point(_) | CommentPart::Handle(..) if !cx.allowed || a.locked => {
+                // No permission or a locked comment: no handle is offered, so no reshape or
+                // resize starts, and nothing changes (the press only selects).
+                consumed = true;
+            }
             CommentPart::Point(point) => {
                 let points = a.points.iter().map(|q| [f64::from(q[0]), f64::from(q[1])]).collect();
                 cv.gesture = Some(Gesture::Reshape { page: cx.page, index: a.index, point, points });
@@ -264,7 +321,7 @@ fn select_input(
                     cv.also.retain(|k| *k != grabbed);
                 }
                 cv.reveal = true;
-                if cx.allowed {
+                if cx.allowed && !a.locked {
                     cv.gesture = Some(Gesture::Move { page: cx.page, index: a.index, from: o });
                 }
                 consumed = true;
@@ -272,13 +329,22 @@ fn select_input(
             CommentPart::Body => {}
         }
     }
-    if matches!(cv.gesture, Some(Gesture::Move { page, .. } | Gesture::Resize { page, .. } | Gesture::Reshape { page, .. }) if page == cx.page) {
+    if matches!(
+        cv.gesture,
+        Some(
+            Gesture::Move { page, .. }
+                | Gesture::Resize { page, .. }
+                | Gesture::Reshape { page, .. }
+                | Gesture::PopupMove { page, .. }
+                | Gesture::PopupResize { page, .. }
+        ) if page == cx.page
+    ) {
         consumed = true;
     }
     if resp.drag_stopped()
         && let Some(p) = pointer
     {
-        finish_select_gesture(ui, cx, view, p);
+        finish_select_gesture(ui.input(|i| i.modifiers.shift), cx, view, p);
     }
     let cv = &mut view.comments;
     // (egui clears the press origin on release, so clicks are located by the pointer.)
@@ -287,6 +353,14 @@ fn select_input(
         // A click elsewhere (a link beneath text highlighting included: it follows the link; a
         // form field; added text) leaves comments unselected.
         match owner {
+            // The pop-up's close control: closing is written to the file like opening.
+            Some((a, CommentPart::PopupClose)) => {
+                cv.select_only((cx.page, a.index));
+                if cx.allowed && !a.locked {
+                    view.pending_edit = Some(popup_edit(cx, a, false));
+                }
+                consumed = true;
+            }
             Some((a, _)) => {
                 // ⌘/Ctrl-click (or ⇧-click) adds the comment to the selection, as in Acrobat.
                 if ui.input(|i| i.modifiers.command || i.modifiers.shift) {
@@ -304,9 +378,18 @@ fn select_input(
     if resp.double_clicked()
         && on_page
         && cx.allowed
-        && let Some((a, _)) = owner
+        && let Some((a, part)) = owner
+        && part != CommentPart::PopupClose
     {
         cv.select_only((cx.page, a.index));
+        // A double-click on a note's icon opens its pop-up, or closes it again; one inside the
+        // pop-up edits the note's text, as the context menu's Edit text does. A locked note
+        // keeps its pop-up as it is, so the double-click edits its text.
+        if a.subtype == "Text" && part == CommentPart::Body && !a.locked {
+            let open = a.popup.is_some_and(|(_, open)| open);
+            view.pending_edit = Some(popup_edit(cx, a, !open));
+            return true;
+        }
         cv.composer = Some(Composer {
             page: cx.page,
             at: edit_anchor(cx.info, a),
@@ -319,15 +402,33 @@ fn select_input(
     consumed
 }
 
+/// The edit that opens or closes note `a`'s pop-up. Opening puts the pop-up inside the page, at
+/// least [`POPUP_MIN_PT`] a side (a note with no pop-up gets one, as the engine makes it).
+pub(super) fn popup_edit(cx: &PageCx<'_>, a: &Annotation, open: bool) -> Edit {
+    let (page, index) = (cx.page, a.index);
+    if !open {
+        return Edit::SetNotePopup { page, index, open: false, rect: None };
+    }
+    let Some((rect, _)) = a.popup else { return Edit::SetNotePopup { page, index, open: true, rect: None } };
+    let r = cx.xf.user_rect(cx.info, page, rect);
+    let inside = at_least(r.translate(slide_within(r, vec2(0.0, 0.0), cx.xf.rect)), (1, 1), POPUP_MIN_PT * cx.xf.zoom());
+    let inside = inside.translate(slide_within(inside, vec2(0.0, 0.0), cx.xf.rect));
+    // One undo step named for what the user did.
+    Edit::Batch {
+        label: tl!("Open note").to_owned(),
+        edits: vec![Edit::SetNotePopup { page, index, open: true, rect: Some(cx.rect_to_user(inside)) }],
+    }
+}
+
 /// The end of a move, resize or reshape the Select tool began on this page: the edit it makes,
-/// for the pointer released at `p`.
-fn finish_select_gesture(ui: &egui::Ui, cx: &PageCx<'_>, view: &mut DocView, p: Pos2) {
+/// for the pointer released at `p`. Each stays on the page (the box the view shows, whatever the
+/// view's rotation), and a drag under the slip threshold ([`SLIP_PT`], page points) changes nothing.
+pub(super) fn finish_select_gesture(shift: bool, cx: &PageCx<'_>, view: &mut DocView, p: Pos2) {
+    let zoom = cx.xf.zoom();
     match view.comments.gesture.clone() {
         Some(Gesture::Move { page, index, from }) if page == cx.page => {
             view.comments.gesture = None;
-            let (a, b) = (cx.to_user(from), cx.to_user(p));
-            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-            if from.distance(p) >= 2.0 {
+            if slipped(from, p, zoom) {
                 // The other selected comments on this page (not text markup, which is where
                 // its text is, nor a locked one, which would refuse the whole step) move with
                 // the dragged one, as one undo step.
@@ -338,6 +439,15 @@ fn finish_select_gesture(ui: &egui::Ui, cx: &PageCx<'_>, view: &mut DocView, p: 
                     .filter(|(p, i)| *p == page && *i != index && cx.get(*i).is_some_and(|a| !is_markup(&a.subtype) && !a.locked))
                     .map(|(_, i)| *i)
                     .collect();
+                // The whole group stops at the page edge.
+                let group = std::iter::once(index).chain(others.iter().copied()).filter_map(|i| cx.get(i)).map(|a| cx.screen_rect(a));
+                let Some(bounds) = group.reduce(|a, b| a.union(b)) else { return };
+                let d = slide_within(bounds, p - from, cx.xf.rect);
+                if d.length() < 0.01 {
+                    return;
+                }
+                let (a, b) = (cx.to_user(from), cx.to_user(from + d));
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
                 view.pending_edit = Some(if others.is_empty() {
                     Edit::MoveAnnotation { page, index, dx, dy }
                 } else {
@@ -350,20 +460,39 @@ fn finish_select_gesture(ui: &egui::Ui, cx: &PageCx<'_>, view: &mut DocView, p: 
             view.comments.gesture = None;
             if let Some(a) = cx.get(index) {
                 let from_rect = cx.screen_rect(a);
-                let shift = ui.input(|i| i.modifiers.shift);
-                let r = resized(from_rect, handle, p - from, corner_ratio(from_rect, aspect_ratio, shift));
+                let r = cx.resize_preview(from_rect, handle, from, p, corner_ratio(from_rect, aspect_ratio, shift));
                 let rect = a.rect_for_shown(cx.rect_to_user(r), cx.rotation());
-                if r.width() >= 4.0 && r.height() >= 4.0 {
+                if slipped(from, p, zoom) && r.width() / zoom >= SLIP_PT && r.height() / zoom >= SLIP_PT {
                     view.pending_edit = Some(Edit::ResizeAnnotation { page, index, rect });
                 }
             }
         }
         Some(Gesture::Reshape { page, index, point, points }) if page == cx.page => {
             view.comments.gesture = None;
-            let shift = ui.input(|i| i.modifiers.shift);
-            let moved = points.get(point).is_some_and(|q| cx.to_screen(*q).distance(p) >= 2.0);
+            let p = clamp_to(cx.xf.rect, p);
+            let moved = points.get(point).is_some_and(|q| slipped(cx.to_screen(*q), p, zoom));
             if moved {
                 view.pending_edit = Some(Edit::ReshapeAnnotation { page, index, points: reshaped(&points, point, cx.to_user(p), shift) });
+            }
+        }
+        Some(Gesture::PopupMove { page, index, from }) if page == cx.page => {
+            view.comments.gesture = None;
+            if slipped(from, p, zoom)
+                && let Some(a) = cx.get(index)
+                && let Some(r) = cx.popup_screen_rect(a, None, None, None)
+            {
+                let moved = r.translate(slide_within(r, p - from, cx.xf.rect));
+                view.pending_edit = Some(Edit::SetNotePopup { page, index, open: true, rect: Some(cx.rect_to_user(moved)) });
+            }
+        }
+        Some(Gesture::PopupResize { page, index, handle, from }) if page == cx.page => {
+            view.comments.gesture = None;
+            if slipped(from, p, zoom)
+                && let Some(a) = cx.get(index)
+                && let Some(r) = cx.popup_screen_rect(a, None, None, None)
+            {
+                let resized = at_least(cx.resize_preview(r, handle, from, p, None), handle, POPUP_MIN_PT * zoom);
+                view.pending_edit = Some(Edit::SetNotePopup { page, index, open: true, rect: Some(cx.rect_to_user(resized)) });
             }
         }
         _ => {}

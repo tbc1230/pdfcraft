@@ -5,11 +5,41 @@ use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString};
 
 use crate::{AnnotError, annots, page_ref, page_refs, set_annots};
 
+/// How a page target of a link is shown: the destination types of ISO 32000-2 §12.3.2.2 that fit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinkFit {
+    /// Fit page (`/Fit`, read also from `/FitB`).
+    #[default]
+    Page,
+    /// Fit width (`/FitH null`, read also from `/FitBH`).
+    Width,
+    /// Fit height (`/FitV null`, read also from `/FitBV`).
+    Height,
+}
+
+impl LinkFit {
+    pub const ALL: [LinkFit; 3] = [LinkFit::Page, LinkFit::Width, LinkFit::Height];
+
+    /// The label of the View menu's entry for this fit (the catalogs have these texts).
+    pub fn label(self) -> &'static str {
+        match self {
+            LinkFit::Page => "Fit to page",
+            LinkFit::Width => "Fit to width",
+            LinkFit::Height => "Fit to height",
+        }
+    }
+}
+
 /// Where a link goes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LinkAction {
-    /// A page of this document (0-based), shown fitting the window (`/Fit`).
-    Page(usize),
+    /// A page of this document (0-based), shown with `fit`. Any other destination type
+    /// (`/XYZ`, `/FitR`, ...) is listed as `LinkFit::Page`; an edit that does not set the action
+    /// leaves it as it is.
+    Page {
+        page: usize,
+        fit: LinkFit,
+    },
     Uri(String),
     /// Something PdfCraft doesn't edit yet (named destination, JavaScript…): kept as is.
     Other(String),
@@ -87,17 +117,23 @@ fn nums(doc: &Document, o: Option<&Object>) -> Vec<f64> {
 }
 
 fn action_of(doc: &Document, d: &Dict, pages: &[ObjRef], uri_budget: &mut usize) -> LinkAction {
-    let dest_page = |dest: &Object| -> Option<usize> {
+    let dest_page = |dest: &Object| -> Option<LinkAction> {
         let a = doc.resolve(dest);
-        let first = a.as_array()?.first()?.clone();
-        match first {
-            Object::Ref(r) => pages.iter().position(|p| *p == r),
-            Object::Int(i) => usize::try_from(i).ok(),
-            _ => None,
-        }
+        let items = a.as_array()?;
+        let page = match items.first()?.clone() {
+            Object::Ref(r) => pages.iter().position(|p| *p == r)?,
+            Object::Int(i) => usize::try_from(i).ok()?,
+            _ => return None,
+        };
+        let fit = match items.get(1).map(|k| doc.resolve(k)).and_then(|k| k.as_name().map(<[u8]>::to_vec)).as_deref() {
+            Some(b"FitH" | b"FitBH") => LinkFit::Width,
+            Some(b"FitV" | b"FitBV") => LinkFit::Height,
+            _ => LinkFit::Page,
+        };
+        Some(LinkAction::Page { page, fit })
     };
     if let Some(dest) = d.get(b"Dest") {
-        return dest_page(dest).map_or_else(|| LinkAction::Other("named destination".into()), LinkAction::Page);
+        return dest_page(dest).unwrap_or_else(|| LinkAction::Other("named destination".into()));
     }
     let Some(a) = d.get(b"A").map(|a| doc.resolve(a)).and_then(|a| a.as_dict().cloned()) else { return LinkAction::Other("no action".into()) };
     match a.name(b"S") {
@@ -115,7 +151,7 @@ fn action_of(doc: &Document, d: &Dict, pages: &[ObjRef], uri_budget: &mut usize)
                 None => LinkAction::Other("web address too long".into()),
             }
         }
-        Some(b"GoTo") => a.get(b"D").and_then(dest_page).map_or_else(|| LinkAction::Other("named destination".into()), LinkAction::Page),
+        Some(b"GoTo") => a.get(b"D").and_then(dest_page).unwrap_or_else(|| LinkAction::Other("named destination".into())),
         Some(s) => LinkAction::Other(String::from_utf8_lossy(s).into_owned()),
         None => LinkAction::Other("no action".into()),
     }
@@ -214,12 +250,39 @@ fn uri_bytes(u: &str) -> Vec<u8> {
     out
 }
 
+/// The web address a link may be given: text (trimmed) that begins with `http://` or `https://`
+/// (the scheme in any letter case) and has a host. Anything else (no scheme, `file:`,
+/// `javascript:`, `mailto:`, `ftp:`) is refused, with the reason. A host holds no space or control
+/// character and is non-empty once a `user@` prefix and a `:port` are taken off.
+pub fn web_address(text: &str) -> Result<String, AnnotError> {
+    let t = text.trim();
+    let rest = [("http://", 7), ("https://", 8)]
+        .iter()
+        .find_map(|(p, n)| t.get(..*n).filter(|h| h.eq_ignore_ascii_case(p)).and_then(|_| t.get(*n..)))
+        .ok_or_else(|| AnnotError::Invalid("a web address begins with http:// or https://".into()))?;
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host =
+        if host_port.starts_with('[') { host_port.split(']').next().unwrap_or_default() } else { host_port.split(':').next().unwrap_or_default() };
+    if host.trim_start_matches('[').is_empty() || t.chars().any(char::is_control) || authority.chars().any(char::is_whitespace) {
+        return Err(AnnotError::Invalid("a web address needs a host after http:// or https://".into()));
+    }
+    Ok(t.to_string())
+}
+
 fn write_action(doc: &Document, d: &mut Dict, a: &LinkAction) -> Result<(), AnnotError> {
     match a {
-        LinkAction::Page(p) => {
-            let target = page_ref(doc, *p)?;
+        LinkAction::Page { page, fit } => {
+            let target = page_ref(doc, *page)?;
             d.remove(b"A");
-            d.set(b"Dest".to_vec(), Object::Array(vec![Object::Ref(target), Object::name("Fit")]));
+            // Fit width and fit height leave the top or left coordinate null: the page's own top or
+            // left edge, as no position is asked for.
+            let dest = match fit {
+                LinkFit::Page => vec![Object::Ref(target), Object::name("Fit")],
+                LinkFit::Width => vec![Object::Ref(target), Object::name("FitH"), Object::Null],
+                LinkFit::Height => vec![Object::Ref(target), Object::name("FitV"), Object::Null],
+            };
+            d.set(b"Dest".to_vec(), Object::Array(dest));
         }
         LinkAction::Uri(u) => {
             let u = u.trim();
@@ -255,6 +318,9 @@ fn checked_rect(rect: [f64; 4]) -> Result<[f64; 4], AnnotError> {
 /// Add a link over `rect` (user space). Returns its index in the page's `/Annots`.
 pub fn add(doc: &mut Document, page: usize, rect: [f64; 4], action: &LinkAction, style: &LinkStyle) -> Result<usize, AnnotError> {
     let p = page_ref(doc, page)?;
+    if let LinkAction::Uri(u) = action {
+        web_address(u)?;
+    }
     let obj = new_link(doc, p, rect, action, style)?;
     let mut list = annots(doc, p);
     list.push(Object::Ref(obj));
@@ -300,6 +366,9 @@ pub fn set(
     style: Option<&LinkStyle>,
 ) -> Result<(), AnnotError> {
     let (_, r) = link_at(doc, page, index)?;
+    if let Some(LinkAction::Uri(u)) = action {
+        web_address(u)?;
+    }
     let mut d = doc.get(r).as_dict().cloned().unwrap_or_default();
     if let Some(rect) = rect {
         let rr = checked_rect(rect)?;

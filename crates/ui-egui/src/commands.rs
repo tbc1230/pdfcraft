@@ -104,6 +104,7 @@ const OFFERED_ON_THE_WEB: &[&str] = &[
     "page.delete",
     // "Insert blank pages".
     "page.insert_blank",
+    "page.insert_blank_before",
     // "Insert pages from another PDF".
     "page.insert",
     // "Undo and redo markup changes" and "Undo and redo page changes".
@@ -537,12 +538,17 @@ impl PdfCraftApp {
             "page.delete" => {
                 self.apply_edit(Edit::DeletePages { pages: targets });
             }
-            "page.insert_blank" => {
-                if let (Some(i), Some(&last)) = (active, targets.last())
-                    && let Some(p) = self.session.get(self.views[i].id).and_then(|d| d.info.pages.get(last))
+            // After the last selected page, or before the first one: the new page has that page's
+            // size and ends up selected (`editing::select_after_edit`).
+            "page.insert_blank" | "page.insert_blank_before" => {
+                let before = id == "page.insert_blank_before";
+                let anchor = if before { targets.iter().min() } else { targets.iter().max() };
+                if let (Some(i), Some(&anchor)) = (active, anchor)
+                    && let Some(p) = self.session.get(self.views[i].id).and_then(|d| d.info.pages.get(anchor))
                 {
                     let (w, h) = ((p.crop[2] - p.crop[0]).abs().max(1.0) as f64, (p.crop[3] - p.crop[1]).abs().max(1.0) as f64);
-                    self.apply_edit(Edit::InsertBlankPage { at: last + 1, width: w, height: h });
+                    let at = if before { anchor } else { anchor.saturating_add(1) };
+                    self.apply_edit(Edit::InsertBlankPage { at, width: w, height: h });
                 }
             }
             "page.insert" => self.insert_from_file_dialog(),

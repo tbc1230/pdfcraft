@@ -1003,12 +1003,12 @@ fn stamps_draw_their_label_and_by_line() {
 
 #[test]
 fn links_are_added_edited_listed_and_removed() {
-    use crate::links::{self, Highlight, LinkAction, LinkStyle};
+    use crate::links::{self, Highlight, LinkAction, LinkFit, LinkStyle};
     let mut doc = fixture();
     let before = links::list(&doc).len();
     let i = links::add(&mut doc, 0, [10.0, 10.0, 110.0, 30.0], &LinkAction::Uri("https://example.org".into()), &LinkStyle::default()).unwrap();
     let style = LinkStyle { visible: true, color: [1.0, 0.0, 0.0], width: 2.0, dashed: true, underline: false, highlight: Highlight::Outline };
-    links::add(&mut doc, 1, [10.0, 10.0, 60.0, 30.0], &LinkAction::Page(0), &style).unwrap();
+    links::add(&mut doc, 1, [10.0, 10.0, 60.0, 30.0], &LinkAction::Page { page: 0, fit: LinkFit::Page }, &style).unwrap();
     let doc = reopen(&doc);
     let all = links::list(&doc);
     assert_eq!(all.len(), before + 2);
@@ -1017,17 +1017,137 @@ fn links_are_added_edited_listed_and_removed() {
         (web.action.clone(), web.style.visible, web.style.highlight),
         (LinkAction::Uri("https://example.org".into()), false, Highlight::Invert)
     );
-    let page = all.iter().find(|l| l.page == 1 && l.action == LinkAction::Page(0)).unwrap().clone();
+    let page = all.iter().find(|l| l.page == 1 && l.action == LinkAction::Page { page: 0, fit: LinkFit::Page }).unwrap().clone();
     assert_eq!(page.style, style);
     let mut doc = doc;
-    links::set(&mut doc, 1, page.index, Some([0.0, 0.0, 50.0, 20.0]), Some(&LinkAction::Uri("mailto:ada@example.org".into())), None).unwrap();
+    links::set(&mut doc, 1, page.index, Some([0.0, 0.0, 50.0, 20.0]), Some(&LinkAction::Uri("http://ada.example.org".into())), None).unwrap();
     let changed = links::list(&doc).into_iter().find(|l| l.page == 1 && l.index == page.index).unwrap();
-    assert_eq!((changed.rect, changed.action), ([0.0, 0.0, 50.0, 20.0], LinkAction::Uri("mailto:ada@example.org".into())));
+    assert_eq!((changed.rect, changed.action), ([0.0, 0.0, 50.0, 20.0], LinkAction::Uri("http://ada.example.org".into())));
     links::delete(&mut doc, 1, page.index).unwrap();
     assert!(links::delete(&mut doc, 0, 999).is_err(), "no such annotation");
     let n = links::remove_all(&mut doc, None).unwrap();
     assert!(n >= 1 && links::list(&doc).is_empty());
-    assert!(links::add(&mut doc, 0, [0.0, 0.0, 1.0, 1.0], &LinkAction::Page(0), &LinkStyle::default()).is_err(), "too small");
+    assert!(
+        links::add(&mut doc, 0, [0.0, 0.0, 1.0, 1.0], &LinkAction::Page { page: 0, fit: LinkFit::Page }, &LinkStyle::default()).is_err(),
+        "too small"
+    );
+}
+
+#[test]
+fn a_page_target_keeps_its_fit_through_a_save_and_a_reopen() {
+    use crate::links::{self, LinkAction, LinkFit, LinkStyle};
+    let mut doc = fixture();
+    let rects = [[10.0, 10.0, 60.0, 30.0], [70.0, 10.0, 120.0, 30.0], [130.0, 10.0, 180.0, 30.0]];
+    for (rect, fit) in rects.iter().zip(LinkFit::ALL) {
+        links::add(&mut doc, 0, *rect, &LinkAction::Page { page: 1, fit }, &LinkStyle::default()).unwrap();
+    }
+    let doc = reopen(&doc);
+    let all = links::list(&doc);
+    assert_eq!(all.len(), 3);
+    for (item, fit) in all.iter().zip(LinkFit::ALL) {
+        assert_eq!(item.action, LinkAction::Page { page: 1, fit });
+    }
+    assert_eq!(all.iter().map(|l| l.rect).collect::<Vec<_>>(), rects.to_vec(), "same areas");
+    // The destination types written.
+    let kinds: Vec<Vec<u8>> = all
+        .iter()
+        .filter_map(|l| {
+            let d = doc.get(l.obj?).as_dict().cloned()?;
+            let dest = doc.resolve(d.get(b"Dest")?);
+            dest.as_array()?.get(1).and_then(Object::as_name).map(<[u8]>::to_vec)
+        })
+        .collect();
+    assert_eq!(kinds, vec![b"Fit".to_vec(), b"FitH".to_vec(), b"FitV".to_vec()]);
+}
+
+#[test]
+fn destinations_written_by_other_programs_read_as_their_fit_and_stay_when_the_action_is_not_set() {
+    use crate::links::{self, LinkAction, LinkFit, LinkStyle};
+    let mut doc = fixture();
+    let target = crate::page_ref(&doc, 1).unwrap();
+    let kinds: [(&str, Vec<Object>, LinkFit); 6] = [
+        ("FitB", vec![], LinkFit::Page),
+        ("FitBH", vec![Object::Real(100.0)], LinkFit::Width),
+        ("FitBV", vec![Object::Real(10.0)], LinkFit::Height),
+        ("FitH", vec![Object::Real(100.0)], LinkFit::Width),
+        ("FitV", vec![Object::Real(10.0)], LinkFit::Height),
+        ("XYZ", vec![Object::Real(10.0), Object::Real(100.0), Object::Null], LinkFit::Page),
+    ];
+    for (k, (name, operands, _)) in kinds.iter().enumerate() {
+        let i = links::add(
+            &mut doc,
+            0,
+            [10.0 + 20.0 * k as f64, 10.0, 25.0 + 20.0 * k as f64, 30.0],
+            &LinkAction::Page { page: 0, fit: LinkFit::Page },
+            &LinkStyle::default(),
+        )
+        .unwrap();
+        let obj = links::list(&doc).into_iter().find(|l| l.index == i && l.page == 0).and_then(|l| l.obj).unwrap();
+        let mut dest = vec![Object::Ref(target), Object::name(name)];
+        dest.extend(operands.iter().cloned());
+        doc.update_dict(obj, |d| {
+            d.set(b"Dest".to_vec(), Object::Array(dest));
+        })
+        .unwrap();
+    }
+    let all = links::list(&doc);
+    for (item, (_, _, fit)) in all.iter().zip(kinds.iter()) {
+        assert_eq!(item.action, LinkAction::Page { page: 1, fit: *fit });
+    }
+    // An edit of the appearance alone leaves a destination byte for byte.
+    let before: Vec<Option<Object>> = all.iter().map(|l| doc.get(l.obj.unwrap()).as_dict().and_then(|d| d.get(b"Dest").cloned())).collect();
+    for l in &all {
+        links::set(&mut doc, 0, l.index, None, None, Some(&LinkStyle { visible: true, ..LinkStyle::default() })).unwrap();
+    }
+    let after: Vec<Option<Object>> = all.iter().map(|l| doc.get(l.obj.unwrap()).as_dict().and_then(|d| d.get(b"Dest").cloned())).collect();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn a_link_accepts_only_a_web_address_with_a_host() {
+    use crate::links::{self, LinkAction, LinkStyle, web_address};
+    for ok in [
+        "http://example.org",
+        "https://example.org/a?b=c#d",
+        "HTTPS://Example.org",
+        "  http://a.b  ",
+        "http://user@host:8080/x",
+        "http://[::1]/x",
+        "http://localhost",
+    ] {
+        assert!(web_address(ok).is_ok(), "{ok}");
+    }
+    for bad in [
+        "",
+        "example.org",
+        "www.example.org",
+        "file:///C:/x.pdf",
+        "javascript:alert(1)",
+        "mailto:a@b.c",
+        "ftp://x.org/f",
+        "data:text/html,x",
+        "https://",
+        "http://",
+        "https:///path",
+        "http://:80/",
+        "http://@/",
+        "https:example.org",
+        "http://exa mple.org",
+        "http://[",
+        "http:/example.org",
+    ] {
+        assert!(web_address(bad).is_err(), "{bad:?}");
+    }
+    let mut doc = fixture();
+    let n = links::list(&doc).len();
+    let style = LinkStyle::default();
+    assert!(links::add(&mut doc, 0, [10.0, 10.0, 60.0, 30.0], &LinkAction::Uri("javascript:alert(1)".into()), &style).is_err());
+    assert_eq!(links::list(&doc).len(), n, "a refused address adds nothing");
+    let i = links::add(&mut doc, 0, [10.0, 10.0, 60.0, 30.0], &LinkAction::Uri("https://example.org".into()), &style).unwrap();
+    assert!(links::set(&mut doc, 0, i, None, Some(&LinkAction::Uri("file:///x".into())), None).is_err());
+    assert_eq!(links::list(&doc).iter().find(|l| l.index == i).unwrap().action, LinkAction::Uri("https://example.org".into()));
+    // Addresses found in text are still linked, a mailto: one included.
+    assert_eq!(links::add_many(&mut doc, &[(0, vec![[10.0, 40.0, 60.0, 60.0]], "mailto:a@example.org".into())], &style).unwrap(), 1);
 }
 
 #[test]

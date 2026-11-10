@@ -1819,3 +1819,139 @@ fn a_corner_drag_of_a_placed_image_keeps_its_proportions() {
     assert!(w > 125.0, "the image grew: {w}");
     assert!((w / hh - 2.0).abs() < 0.02, "proportions kept: {w} x {hh}");
 }
+
+fn red_png(w: u32, h: u32) -> Vec<u8> {
+    let mut png = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut png, w, h);
+        enc.set_color(png::ColorType::Rgb);
+        let mut writer = enc.write_header().unwrap();
+        writer.write_image_data(&[200u8, 30, 30].repeat((w * h) as usize)).unwrap();
+    }
+    png
+}
+
+/// A picture added in Edit text & images: selected, settled, and its box (display space).
+fn with_added_picture(h: &mut Harness<'static, PdfCraftApp>) -> [f64; 4] {
+    assert!(h.state_mut().execute("edit.edit_text"));
+    h.run_steps(2);
+    h.state_mut().add_image("red.png".into(), red_png(60, 60));
+    h.run_steps(3);
+    crate::support::settle(h);
+    added(h)[0].content.rect()
+}
+
+/// Presses at `from`, moves to `to` in four steps and releases.
+fn drag_between(h: &mut Harness<'static, PdfCraftApp>, from: Pos2, to: Pos2) {
+    h.hover_at(from);
+    h.run_steps(1);
+    h.drag_at(from);
+    h.run_steps(1);
+    for k in 1..=4 {
+        h.hover_at(from + (to - from) * (k as f32 / 4.0));
+        h.run_steps(1);
+    }
+    h.drop_at(to);
+    h.run_steps(3);
+    crate::support::settle(h);
+}
+
+/// Moving an added picture far past the page edge stops it at the edge, with its size kept; one
+/// undo puts it back and redo repeats the move ("Move and resize a placed object").
+#[test]
+fn an_added_picture_dragged_past_the_page_edge_stops_there_and_is_one_undo_step() {
+    let _gpu = gpu();
+    let mut h = harness();
+    let rect = with_added_picture(&mut h);
+    let page = h.state().views[0].page_screen_rect(0).expect("on screen");
+    let r = item_on_screen(&h, rect);
+    drag_between(&mut h, r.center(), r.center() + egui::vec2(2000.0, 0.0));
+    let moved = added(&h)[0].content.rect();
+    let width = h.state().session.get(h.state().views[0].id).unwrap().info.pages[0].width as f64;
+    assert!(moved[0] > rect[0] + 1.0, "it moved: {moved:?}");
+    assert!(moved[2] <= width + 0.01, "it stays on the page: {moved:?} of {width}");
+    assert!(((moved[2] - moved[0]) - (rect[2] - rect[0])).abs() < 0.01, "its size is kept");
+    assert!(page.width() > 0.0);
+    assert!(h.state_mut().execute("edit.undo"));
+    h.run_steps(2);
+    assert_eq!(added(&h)[0].content.rect(), rect, "one undo puts it back");
+    assert!(h.state_mut().execute("edit.redo"));
+    h.run_steps(2);
+    assert_eq!(added(&h)[0].content.rect(), moved, "redo repeats the move");
+}
+
+/// A corner handle keeps the picture square, also when it is enlarged past the page edge, where
+/// it stops.
+#[test]
+fn an_added_picture_enlarged_by_a_corner_stays_square_and_on_the_page() {
+    let _gpu = gpu();
+    let mut h = harness();
+    let rect = with_added_picture(&mut h);
+    let r = item_on_screen(&h, rect);
+    let grip = r.right_bottom();
+    drag_between(&mut h, grip, grip + egui::vec2(60.0, 10.0));
+    let big = added(&h)[0].content.rect();
+    let (w, hh) = (big[2] - big[0], big[3] - big[1]);
+    assert!(w > rect[2] - rect[0] + 1.0, "it grew: {big:?}");
+    assert!((w - hh).abs() < 0.05 * w, "it stays square: {w} x {hh}");
+    let r = item_on_screen(&h, big);
+    drag_between(&mut h, r.right_bottom(), r.right_bottom() + egui::vec2(3000.0, 3000.0));
+    let huge = added(&h)[0].content.rect();
+    let (page_w, page_h) = {
+        let s = h.state();
+        let p = &s.session.get(s.views[0].id).unwrap().info.pages[0];
+        (p.width as f64, p.height as f64)
+    };
+    assert!(huge[2] <= page_w + 0.05 && huge[1] >= -0.05, "it stops at the page edge: {huge:?}");
+    assert!(huge[3] <= page_h + 0.05, "{huge:?}");
+    let (w, hh) = (huge[2] - huge[0], huge[3] - huge[1]);
+    assert!((w - hh).abs() < 0.05 * w, "still square: {w} x {hh}");
+}
+
+/// A drag under the slip threshold of 2 pt changes nothing.
+#[test]
+fn an_added_picture_dragged_under_two_points_does_not_change() {
+    let _gpu = gpu();
+    let mut h = harness();
+    let rect = with_added_picture(&mut h);
+    let r = item_on_screen(&h, rect);
+    let k = h.state().views[0].page_screen_rect(0).expect("on screen").width() / 300.0;
+    drag_between(&mut h, r.center(), r.center() + egui::vec2(1.5 * k, 0.0));
+    assert_eq!(added(&h)[0].content.rect(), rect);
+    let grip = r.right_bottom();
+    drag_between(&mut h, grip, grip + egui::vec2(1.5 * k, 0.0));
+    assert_eq!(added(&h)[0].content.rect(), rect);
+}
+
+/// With modification forbidden by the PDF an added picture is not moved or resized.
+#[test]
+fn an_added_picture_is_not_moved_or_resized_when_the_pdf_forbids_modification() {
+    let _gpu = gpu();
+    let mut source = harness();
+    let _ = with_added_picture(&mut source);
+    source.state_mut().apply_edit(pdfcraft_engine::Edit::Protect(pdfcraft_engine::Protection {
+        permissions_password: Some("owner".into()),
+        changes: pdfcraft_engine::Changes::None,
+        copy: true,
+        ..Default::default()
+    }));
+    let bytes = {
+        let s = source.state();
+        s.session.save_bytes(s.views[0].id).unwrap().as_ref().clone()
+    };
+    let mut h = harness_bytes(bytes);
+    h.state_mut().execute("edit.edit_text");
+    h.run_steps(2);
+    let (id, before) = {
+        let s = h.state();
+        let id = s.views[0].id;
+        assert!(!s.session.get(id).unwrap().allows_modification());
+        (id, s.session.save_bytes(id).unwrap())
+    };
+    let page = h.state().views[0].page_screen_rect(0).expect("on screen");
+    let from = page.center();
+    drag_between(&mut h, from, from + egui::vec2(40.0, 40.0));
+    drag_between(&mut h, from + egui::vec2(40.0, 40.0), from + egui::vec2(10.0, 90.0));
+    assert!(h.state().views[0].image_selection.is_none(), "nothing is selected, so no handle shows");
+    assert_eq!(h.state().session.save_bytes(id).unwrap(), before, "nothing changed");
+}

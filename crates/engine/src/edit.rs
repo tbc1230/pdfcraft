@@ -261,6 +261,15 @@ pub enum Edit {
         dx: f64,
         dy: f64,
     },
+    /// Open or close a note's pop-up, the box on the page that shows the note's text, and with
+    /// `rect` (user space) put it there and give it that size. A note with no pop-up gets one.
+    /// Written to the file (`/Open`, `/Popup /Rect`), so it comes back when the file is opened again.
+    SetNotePopup {
+        page: usize,
+        index: usize,
+        open: bool,
+        rect: Option<[f64; 4]>,
+    },
     /// Reshape a line, connected lines, a polygon or a cloud: its points in user space (a line's
     /// two ends, the others' corners).
     ReshapeAnnotation {

@@ -2505,8 +2505,6 @@ fn apply_notice(app: &mut PdfCraftApp, index: usize, notice: Option<Notice>) {
         Some(Notice::Signatures) => app.right = Some(RightPanel::Signatures),
         Some(Notice::FieldHighlights(on)) => app.view_defaults.highlight_fields = on,
         Some(Notice::Console) => app.dialog = Some(crate::Dialog::JsConsole),
-        // Back on in Preferences ▸ General.
-        Some(Notice::HideSecured) => app.show_secured_notice = false,
         None => {}
     }
 }
@@ -3037,12 +3035,12 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     let editing_content =
         (app.left_open && app.left == crate::LeftPanel::Tool("edit")) || matches!(app.quick_tool, QuickTool::AddText | QuickTool::EditText);
     let text_style = app.text_style.clone();
-    let show_secured_notice = app.show_secured_notice;
     let view = &mut app.views[index];
-    // Opened without the owner password and something is restricted. The notice says so unless
-    // the user turned it off (#4035): the restrictions themselves, and Document Properties ▸
-    // Security, stay as they are.
-    let secured = show_secured_notice && doc.security_summary().is_some_and(|s| !(s.owner || (s.permissions.modify() && s.permissions.assemble())));
+    // Opened without the owner password and the permissions withhold any right the state
+    // reports (printing, modifying, copying, annotating, form filling, accessibility extraction,
+    // assembly, high-quality printing): the notice says so, and it cannot be turned off for good.
+    // Dismiss hides it for this document only.
+    let secured = doc.security_summary().is_some_and(|s| s.restricts_any_right());
     let repaired = !doc.repair_log().is_empty();
     let notice = notices(view, doc, secured, repaired, crate::sign_ui::banner(&doc.signatures), ui, &t);
     apply_notice(app, index, notice);

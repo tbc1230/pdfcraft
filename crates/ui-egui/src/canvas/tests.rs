@@ -2431,3 +2431,94 @@ fn enhancing_a_scan_re_renders_the_page_shown() {
     assert!(app.scan_clean_run.is_none());
     assert_eq!(app.views[i].pages.get(&0).unwrap().tag, STALE_TAG, "the old raster is re-rendered");
 }
+
+/// With modification forbidden by the PDF (opened with the user password, `/P` bit 4 cleared),
+/// Edit text is refused ("is not available now"), a click on a paragraph with the Edit text tool
+/// opens no editor, and the document is unchanged. The same click on a document that allows
+/// modification opens the editor.
+#[test]
+fn with_modification_forbidden_edit_text_is_refused_and_a_click_on_a_paragraph_opens_no_editor() {
+    let line = "BT /F1 12 Tf 40 300 Td (Signed and approved by the committee.) Tj ET";
+    let content = format!("<< /Length {} >>\nstream\n{line}\nendstream", line.len() + 1);
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 400] >>",
+        "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        content.as_str(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    ];
+    let mut plain = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(plain.len());
+        plain.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = plain.len();
+    plain.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for o in offsets {
+        plain.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    plain.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
+    let locked = {
+        let mut doc = pdfcraft_cos::Document::open(std::sync::Arc::new(plain.clone())).unwrap();
+        doc.set_encryption(&pdfcraft_cos::NewEncryption {
+            algorithm: pdfcraft_cos::Algorithm::Aes256,
+            user_password: "reader",
+            owner_password: "owner",
+            // Every right but modification (bit 4).
+            permissions: !(1 << 3),
+            encrypt_metadata: true,
+            seed: [4; 32],
+        })
+        .unwrap();
+        pdfcraft_cos::write_full(&doc, &Default::default()).unwrap()
+    };
+    let open = |bytes: Vec<u8>, password: Option<&'static str>| {
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", "en").unwrap();
+            app.open_bytes("paragraph.pdf", None, bytes.clone()).unwrap();
+            if let Some(password) = password {
+                app.submit_password(Some(password.into()));
+            }
+            app.set_option("left", "closed").unwrap();
+            app.set_option("zoom", "150").unwrap();
+            app
+        });
+        for _ in 0..30 {
+            h.run_steps(2);
+        }
+        h
+    };
+    // A click on the paragraph, with the Edit text tool chosen.
+    let click = |h: &mut egui_kittest::Harness<'static, PdfCraftApp>| {
+        h.state_mut().quick_tool = QuickTool::EditText;
+        h.run_steps(2);
+        let r = h.state().views[0].page_screen_rect(0).expect("page on screen");
+        let k = r.width() / 300.0;
+        let p = r.min + vec2(60.0 * k, (400.0 - 304.0) * k);
+        h.hover_at(p);
+        h.run_steps(1);
+        h.drag_at(p);
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.run_steps(4);
+    };
+    // Control: a document that allows modification opens the paragraph.
+    let mut h = open(plain, None);
+    click(&mut h);
+    assert!(h.state().views[0].line_editor.is_some(), "the paragraph opens for typing");
+
+    let mut h = open(locked, Some("reader"));
+    let id = h.state().views[0].id;
+    assert!(!h.state().session.get(id).unwrap().allows_modification());
+    let generation = h.state().session.get(id).unwrap().edit_generation();
+    let refused = h.state_mut().host_run_command("edit.edit_text").unwrap_err();
+    assert!(refused.contains("is not available now"), "{refused}");
+    assert!(!h.state_mut().execute("edit.edit_text"), "the command is refused");
+    click(&mut h);
+    assert!(h.state().views[0].line_editor.is_none(), "no editor opens");
+    let doc = h.state().session.get(id).unwrap();
+    assert_eq!(doc.edit_generation(), generation);
+    assert!(doc.can_undo().is_none(), "the document is unchanged");
+}

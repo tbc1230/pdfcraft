@@ -8,19 +8,25 @@
 //!   `{ ok: false, error }`; it never rejects. `edit_generation` is the value `getState()` reports
 //!   while nothing has changed since these bytes. The editor downloads and posts nothing.
 //! - `runCommand(id)`: a Promise of `{ ok: true }` or `{ ok: false, error }`.
-//! - `placeSignature(bytes)`: a Promise of `{ ok: true }` (the placement started) or
-//!   `{ ok: false, error }`; `bytes` is a `Uint8Array` or `ArrayBuffer`, at most 32 MiB.
+//! - `placeImage(bytes, { name? })`: a Promise of `{ ok: true }` (the placement started: the image
+//!   follows the pointer, a click places it, Esc cancels) or `{ ok: false, error }`; `bytes` is a
+//!   `Uint8Array` or `ArrayBuffer`, at most 32 MiB; `name`, a string, names the image.
+//!   `placeSignature(bytes)` is the same call without the options, kept for compatibility.
 //! - `insertPages(bytes, { name?, password? })`: a Promise of `{ ok: true, pages }` or
 //!   `{ ok: false, error, password_required }`; `bytes` at most 512 MiB. The password is not logged.
 //! - `getState()`: the last state snapshot, a plain object (the no-document state before the first frame).
 //! - `pdfcraft:state`: a `CustomEvent` on the canvas, `detail` = the snapshot, each time it changes.
+//! - `pdfcraft:open-failed`: a `CustomEvent` on the canvas, `detail` = `{ name, cause:
+//!   "password-required", error }`, when the user cancels the editor's password prompt for a file the
+//!   page sent with `pdfcraft:open`. Nothing opened. It carries no password; the editor's prompt
+//!   is how the password is asked, so no function takes one for an open.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::channel;
 
 use eframe::wasm_bindgen::{JsCast as _, JsValue, closure::Closure};
-use pdfcraft_ui_egui::{HostCall, HostCalls, HostPassword, HostStateFn, InsertFromBytesError, SavedBytes, no_document_state};
+use pdfcraft_ui_egui::{HostCall, HostCalls, HostEvent, HostPassword, HostStateFn, InsertFromBytesError, SavedBytes, no_document_state};
 use serde_json::{Value, json};
 
 use crate::api::poll_reply;
@@ -54,9 +60,17 @@ pub fn install(calls: HostCalls, ctx: egui::Context) -> HostStateFn {
         set(&api, "runCommand", run_command);
         let place_calls = calls.clone();
         let place_ctx = ctx.clone();
-        let place_signature = Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |image: JsValue| {
+        let place_image = Closure::<dyn Fn(JsValue, JsValue) -> js_sys::Promise>::new(move |image: JsValue, options: JsValue| {
             let (calls, ctx) = (place_calls.clone(), place_ctx.clone());
-            wasm_bindgen_futures::future_to_promise(async move { Ok(to_js(&place_signature_reply(&calls, &ctx, &image).await)) })
+            wasm_bindgen_futures::future_to_promise(async move { Ok(to_js(&place_image_reply(&calls, &ctx, &image, &options).await)) })
+        });
+        set(&api, "placeImage", place_image);
+        // Kept for compatibility: `placeImage` without a name (the batch 1 to 3 function).
+        let signature_calls = calls.clone();
+        let signature_ctx = ctx.clone();
+        let place_signature = Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |image: JsValue| {
+            let (calls, ctx) = (signature_calls.clone(), signature_ctx.clone());
+            wasm_bindgen_futures::future_to_promise(async move { Ok(to_js(&place_image_reply(&calls, &ctx, &image, &JsValue::UNDEFINED).await)) })
         });
         set(&api, "placeSignature", place_signature);
         let insert_calls = calls.clone();
@@ -70,9 +84,12 @@ pub fn install(calls: HostCalls, ctx: egui::Context) -> HostStateFn {
         let get_state = Closure::<dyn Fn() -> JsValue>::new(move || to_js(&read.borrow()));
         set(&api, "getState", get_state);
     }
-    Box::new(move |state: &Value| {
-        *last.borrow_mut() = state.clone();
-        dispatch_state(state);
+    Box::new(move |event: HostEvent| {
+        if let HostEvent::State(state) = &event {
+            // Read by `getState()` inside the page's own listener, so stored first.
+            *last.borrow_mut() = state.clone();
+        }
+        dispatch(event.event_name(), &event.detail());
     })
 }
 
@@ -107,7 +124,7 @@ fn to_js(value: &Value) -> JsValue {
 
 /// Queue a call and wake the app; false when the queue is unavailable.
 fn queue(calls: &HostCalls, ctx: &egui::Context, call: HostCall) -> bool {
-    let queued = calls.lock().map(|mut q| q.push_back(call)).is_ok();
+    let queued = calls.push(call);
     ctx.request_repaint();
     queued
 }
@@ -136,7 +153,7 @@ async fn run_command_reply(calls: &HostCalls, ctx: &egui::Context, id: String) -
     }
 }
 
-/// The largest image `placeSignature` takes, and the largest PDF `insertPages` takes (the host
+/// The largest image `placeImage` takes, and the largest PDF `insertPages` takes (the host
 /// open's limit, `MAX_OPEN_BYTES` in `main.rs`).
 const MAX_IMAGE_BYTES: u64 = 32 << 20;
 const MAX_PDF_BYTES: u64 = 512 << 20;
@@ -157,14 +174,16 @@ fn bytes_of(value: &JsValue, limit: u64, what: &str, kind: &str) -> Result<Vec<u
     Ok(array.to_vec())
 }
 
-/// `window.pdfcraft.placeSignature(bytes)`: `{ ok: true }` or `{ ok: false, error }`.
-async fn place_signature_reply(calls: &HostCalls, ctx: &egui::Context, image: &JsValue) -> Value {
+/// `window.pdfcraft.placeImage(bytes, { name? })` (and `placeSignature(bytes)`, which passes no
+/// options): `{ ok: true }` or `{ ok: false, error }`. A name that is not a string counts as missing.
+async fn place_image_reply(calls: &HostCalls, ctx: &egui::Context, image: &JsValue, options: &JsValue) -> Value {
     let bytes = match bytes_of(image, MAX_IMAGE_BYTES, "image", "image") {
         Ok(bytes) => bytes,
         Err(error) => return failure(&error),
     };
+    let name = option_string(options, "name");
     let (tx, rx) = channel();
-    if !queue(calls, ctx, HostCall::PlaceSignature(bytes, tx)) {
+    if !queue(calls, ctx, HostCall::PlaceImage { name, bytes, reply: tx }) {
         return failure("the editor is not available");
     }
     match poll_reply(rx).await {
@@ -218,16 +237,16 @@ fn saved_object(saved: SavedBytes) -> JsValue {
     object
 }
 
-/// Dispatch `pdfcraft:state` on the canvas with the snapshot as `detail`. The page's own listeners
-/// run inside the dispatch, so a failure here is logged, never raised into the app.
-fn dispatch_state(state: &Value) {
+/// Dispatch the `CustomEvent` `event` on the canvas with `detail`. The page's own listeners run
+/// inside the dispatch, so a failure here is logged, never raised into the app.
+fn dispatch(event: &str, detail: &Value) {
     let Some(canvas) = crate::app_canvas() else { return };
     let init = web_sys::CustomEventInit::new();
-    init.set_detail(&to_js(state));
-    match web_sys::CustomEvent::new_with_event_init_dict("pdfcraft:state", &init) {
-        Ok(event) => {
-            let _ = canvas.dispatch_event(&event);
+    init.set_detail(&to_js(detail));
+    match web_sys::CustomEvent::new_with_event_init_dict(event, &init) {
+        Ok(made) => {
+            let _ = canvas.dispatch_event(&made);
         }
-        Err(e) => eframe::web_sys::console::warn_1(&format!("PdfCraft: couldn't make the pdfcraft:state event: {e:?}").into()),
+        Err(e) => eframe::web_sys::console::warn_1(&format!("PdfCraft: couldn't make the {event} event: {e:?}").into()),
     }
 }

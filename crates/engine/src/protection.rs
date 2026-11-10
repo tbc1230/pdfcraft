@@ -15,6 +15,25 @@ pub struct SecuritySummary {
     pub pending: bool,
 }
 
+impl SecuritySummary {
+    /// The document was opened without the owner password and its permissions withhold at least
+    /// one of the eight rights the state reports: printing, modifying, copying, annotating, form
+    /// filling, accessibility extraction, assembly, high-quality printing. This is the rule for
+    /// the notice about the restrictions.
+    pub fn restricts_any_right(&self) -> bool {
+        let p = &self.permissions;
+        !self.owner
+            && !(p.print()
+                && p.modify()
+                && p.copy()
+                && p.annotate()
+                && p.fill_forms()
+                && p.extract_for_accessibility()
+                && p.assemble()
+                && p.print_high_quality())
+    }
+}
+
 /// What printing a protected document allows (Acrobat: Printing allowed).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Printing {

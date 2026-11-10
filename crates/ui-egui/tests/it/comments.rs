@@ -3802,6 +3802,26 @@ fn edit_composer_preserves_only_typewriter_whitespace(kind: u8) {
         let p = info.user_to_view((a.rect[0] + a.rect[2]) / 2.0, (a.rect[1] + a.rect[3]) / 2.0);
         page.min + egui::vec2(p[0], p[1]) * (page.width() / info.width)
     };
+    // A double-click on a note's icon opens its pop-up on the page; the text is then edited by a
+    // double-click inside the pop-up (the other kinds open the composer at once).
+    let point = if kind == 2 {
+        support::input::double_click(&mut h, point);
+        h.run_steps(3);
+        support::settle(&mut h);
+        let s = h.state();
+        let v = &s.views[0];
+        let doc = s.session.get(v.id).unwrap();
+        let a = doc.info.annotations.iter().find(|a| a.page == 1 && a.index == 0).unwrap();
+        let (rect, open) = a.popup.expect("a note has a pop-up");
+        assert!(open, "the double-click on the icon opened the pop-up");
+        assert!(s.views[0].comments.composer.is_none(), "no composer yet");
+        let page = v.page_screen_rect(1).expect("the second page is visible");
+        let info = &doc.info.pages[1];
+        let p = info.user_to_view((rect[0] + rect[2]) / 2.0, rect[1] + 20.0);
+        page.min + egui::vec2(p[0], p[1]) * (page.width() / info.width)
+    } else {
+        point
+    };
     support::input::double_click(&mut h, point);
     h.run_steps(3);
     let c = h.state().views[0].comments.composer.as_ref().expect("double-click opens the edit composer");
@@ -4629,4 +4649,57 @@ fn the_selection_bar_is_disabled_when_the_pdf_forbids_annotating() {
         assert_eq!(disabled_count(&h, label), disabled + 1, "the bar's {label} is disabled");
     }
     assert!(comments(&h).is_empty());
+}
+
+/// A note is closed (its icon) or opened (its pop-up on the page); opening, placing and closing
+/// the pop-up are saved in the file and each is one undo step.
+#[test]
+fn a_note_opens_as_a_pop_up_that_moves_resizes_and_closes_within_the_page() {
+    use pdfcraft_engine::{Edit, NewAnnotation, NoteIcon, Shape, Style};
+    let mut h = harness(|app| {
+        app.quick_tool = QuickTool::Select;
+        let shape = Shape::Note { at: [40.0, 150.0], icon: NoteIcon::Comment };
+        let style = Style::default_for(&shape);
+        assert!(app.apply_edit(Edit::AddAnnotation(NewAnnotation { page: 0, shape, style, contents: "Look here".into(), author: "Ada".into() })));
+    });
+    let note = |h: &Harness<'static, PdfCraftApp>| -> Annotation {
+        let s = h.state();
+        s.session.get(s.views[0].id).unwrap().info.annotations.iter().find(|a| a.subtype == "Text").cloned().expect("the note")
+    };
+    assert_eq!(note(&h).popup.map(|p| p.1), Some(false), "closed: only the icon");
+    // Double-click on the icon opens the pop-up.
+    let icon = note(&h).rect;
+    let at_icon = at(&h, (icon[0] + icon[2]) / 2.0, (icon[1] + icon[3]) / 2.0);
+    support::input::double_click(&mut h, at_icon);
+    h.run_steps(3);
+    support::settle(&mut h);
+    let (rect, open) = note(&h).popup.expect("a pop-up");
+    assert!(open, "opened");
+    assert!(rect[0] >= 0.0 && rect[1] >= 0.0 && rect[2] <= 300.0 && rect[3] <= 200.0, "{rect:?} lies on the page");
+    let id = h.state().views[0].id;
+    assert_eq!(h.state().session.get(id).unwrap().can_undo(), Some("Open note"));
+    // Drag the title bar far beyond the page: it stops at the edge, with its size.
+    let bar = at(&h, (rect[0] + rect[2]) / 2.0, rect[3]) + egui::vec2(0.0, 11.0);
+    drag(&mut h, bar, bar + egui::vec2(2000.0, 2000.0));
+    support::settle(&mut h);
+    let (moved, open) = note(&h).popup.unwrap();
+    assert!(open);
+    assert!(moved[2] <= 300.01 && moved[0] >= 0.0 && moved[1] >= -0.01, "{moved:?} stays on the page");
+    assert!(((moved[2] - moved[0]) - (rect[2] - rect[0])).abs() < 0.5, "moved, not resized");
+    assert_eq!(h.state().session.get(id).unwrap().can_undo(), Some("Change pop-up"));
+    // The file keeps the state: saved and opened again, the pop-up is open where it was left.
+    let bytes = h.state().session.save_bytes(id).unwrap();
+    let mut again = pdfcraft_engine::Session::new();
+    let reopened = again.open("saved.pdf", None, bytes, None).unwrap();
+    let kept = again.get(reopened).unwrap().info.annotations.iter().find(|a| a.subtype == "Text").and_then(|a| a.popup).unwrap();
+    assert!(kept.1, "the saved file opens with the pop-up open");
+    for (a, b) in kept.0.iter().zip(moved) {
+        assert!((a - b).abs() < 0.01, "{:?} vs {moved:?}", kept.0);
+    }
+    // The close control closes it: one more undo step, and undo opens it again.
+    let close = at(&h, moved[2], moved[3]) + egui::vec2(-11.0, 11.0);
+    click(&mut h, close);
+    support::settle(&mut h);
+    assert_eq!(note(&h).popup.map(|p| p.1), Some(false), "closed");
+    assert_eq!(h.state().session.get(id).unwrap().can_undo(), Some("Close note"));
 }

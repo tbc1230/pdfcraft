@@ -54,8 +54,6 @@ pub(super) enum Notice {
     Unlock,
     /// Close this historical snapshot tab (View signed version / View revision).
     Close,
-    /// Stop showing the secured-document notice, in every document (#4035).
-    HideSecured,
 }
 
 /// The notice bar above the pages: a file changed on disk first, then what a historical
@@ -133,7 +131,6 @@ pub(super) fn notices(
     }
     let mut open_security = false;
     let mut unlock = false;
-    let mut hide_secured = false;
     let mut open_repairs = false;
     let mut open_console = false;
     let mut toggled = None;
@@ -184,7 +181,7 @@ pub(super) fn notices(
     } else if secured {
         // A secured form still says what it is, and keeps Highlight fields: the security
         // sentence follows the form's.
-        let security = tl!("This document is secured. Some changes are restricted by its security settings.");
+        let security = tl!("This document is secured. This document's security settings restrict some actions.");
         Some(match form {
             Some((icon, text, fields)) => (icon, format!("{text} {security}"), fields),
             None => ("lock", security.to_string(), false),
@@ -219,10 +216,6 @@ pub(super) fn notices(
         if secured && doc.can_unlock() && crate::widgets::pill_button(ui, tl!("Unlock…"), true).clicked() {
             unlock = true;
         }
-        // Only when the bar shows the security message: a form's stopped scripts come first.
-        if secured && !scripts_off && crate::widgets::pill_button(ui, tl!("Don't show again"), false).clicked() {
-            hide_secured = true;
-        }
         if repaired && !secured && info.fields.is_empty() && crate::widgets::pill_button(ui, tl!("Details"), false).clicked() {
             open_repairs = true;
         }
@@ -235,9 +228,6 @@ pub(super) fn notices(
     }
     if unlock {
         return Some(Notice::Unlock);
-    }
-    if hide_secured {
-        return Some(Notice::HideSecured);
     }
     open_security.then_some(Notice::Security).or(toggled)
 }

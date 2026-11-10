@@ -38,6 +38,41 @@ pub struct Summary {
     /// A line's two ends (`/L`), or the corners of connected lines, a polygon or a cloud
     /// (`/Vertices`), in user space; empty for other comments.
     pub points: Vec<[f32; 2]>,
+    /// A note's pop-up: its `/Rect` in user space and whether it is open ([`note_popup`]); `None`
+    /// for every other comment.
+    pub popup: Option<([f32; 4], bool)>,
+}
+
+/// Where a note's pop-up lies when the note has none yet (or none that can be read): to the
+/// right of the icon, 200 x 120 points, hanging from its top edge. `rect` is the note's `/Rect`.
+pub fn default_popup_rect(rect: [f64; 4]) -> [f64; 4] {
+    [rect[2] + 10.0, rect[3] - 120.0, rect[2] + 210.0, rect[3]]
+}
+
+/// The pop-up of the note `d` (a Text annotation that is not a reply): the `/Rect` and `/Open` of
+/// its `/Popup`, or, for a note with no pop-up, the default place and the note's own `/Open`.
+fn note_popup(doc: &Document, d: &Dict, rect: [f32; 4]) -> Option<([f32; 4], bool)> {
+    if d.name(b"Subtype") != Some(b"Text") || d.contains(b"IRT") {
+        return None;
+    }
+    let default = default_popup_rect(rect.map(f64::from)).map(|v| v as f32);
+    let as_open = |o: &Object| matches!(&*doc.resolve(o), Object::Bool(true));
+    let popup = d.reference(b"Popup").map(|r| doc.get(r));
+    let Some(pd) = popup.as_ref().and_then(|p| p.as_dict()) else {
+        return Some((default, d.get(b"Open").is_some_and(as_open)));
+    };
+    let nums: Vec<f32> = pd
+        .get(b"Rect")
+        .map(|o| doc.resolve(o))
+        .and_then(|o| o.as_array().map(|a| a.iter().map(|x| doc.resolve(x).as_f64().unwrap_or(f64::NAN) as f32).collect()))
+        .unwrap_or_default();
+    let box_ = match nums[..] {
+        [a, b, c, e] if [a, b, c, e].iter().all(|v| v.is_finite()) && (a - c).abs() >= 1.0 && (b - e).abs() >= 1.0 => {
+            [a.min(c), b.min(e), a.max(c), b.max(e)]
+        }
+        _ => default,
+    };
+    Some((box_, pd.get(b"Open").is_some_and(as_open)))
 }
 
 pub(crate) fn text_value(doc: &Document, d: &Dict, key: &[u8]) -> Option<String> {
@@ -148,6 +183,7 @@ pub fn summaries(doc: &Document) -> Vec<Summary> {
                 intent: d.get(b"IT").and_then(|o| doc.resolve(o).as_name().map(|n| String::from_utf8_lossy(n).into_owned())),
                 fill_sign: is_fill_sign(doc, d),
                 no_rotate: drawn_upright(doc, d),
+                popup: note_popup(doc, d, rect),
                 points,
             });
         }

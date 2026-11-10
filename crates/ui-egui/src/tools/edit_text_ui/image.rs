@@ -177,6 +177,54 @@ fn resize_affine_frame(frame: Matrix, handle: ImageHandle, delta: (f64, f64), pr
     resized.0.iter().all(|v| v.is_finite()).then_some(resized)
 }
 
+/// A drag shorter than this many points only selects the picture; nothing changes.
+const SLIP_PT: f32 = 2.0;
+
+/// Whether the pointer went [`SLIP_PT`] points from where the press began.
+fn moved_enough(xf: &PageXform, from: Pos2, to: Pos2) -> bool {
+    let zoom = xf.zoom();
+    zoom.is_finite() && zoom > 0.0 && (to - from).length() >= SLIP_PT * zoom
+}
+
+/// The shift nearest `d` that keeps `r` inside `bounds`, per axis.
+fn slide_into(r: Rect, d: egui::Vec2, bounds: Rect) -> egui::Vec2 {
+    let axis = |lo: f32, hi: f32, min: f32, max: f32, d: f32| {
+        let (low, high) = ((lo - min).min(0.0), (hi - max).max(0.0));
+        if d.is_finite() { d.clamp(low, high) } else { 0.0 }
+    };
+    egui::vec2(axis(bounds.min.x, bounds.max.x, r.min.x, r.max.x, d.x), axis(bounds.min.y, bounds.max.y, r.min.y, r.max.y, d.y))
+}
+
+fn inside(r: Rect, bounds: Rect) -> bool {
+    const EPS: f32 = 0.01;
+    r.min.x >= bounds.min.x - EPS && r.min.y >= bounds.min.y - EPS && r.max.x <= bounds.max.x + EPS && r.max.y <= bounds.max.y + EPS
+}
+
+/// The bounding box of screen points; `None` when one is not finite.
+fn bbox(points: &[Pos2]) -> Option<Rect> {
+    points.iter().all(|p| p.x.is_finite() && p.y.is_finite()).then(|| Rect::from_points(points))
+}
+
+/// What `make` gives for the whole drag (`t` = 1) when its box (the second value) lies inside
+/// `bounds`; else for the largest part of the drag that does, found by bisection (`t` = 0 is the
+/// start, inside by construction of `bounds`).
+fn fit_to<T>(bounds: Rect, make: impl Fn(f32) -> (T, Rect)) -> T {
+    let (full, r) = make(1.0);
+    if inside(r, bounds) {
+        return full;
+    }
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    for _ in 0..16 {
+        let mid = (lo + hi) * 0.5;
+        if inside(make(mid).1, bounds) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    make(lo).0
+}
+
 pub(crate) fn user_to_screen(xf: &PageXform, info: &DocInfo, page: usize, x: f64, y: f64) -> Pos2 {
     let Some(p) = info.pages.get(page) else { return Pos2::ZERO };
     let v = p.user_to_view(x as f32, y as f32);
@@ -821,23 +869,34 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
             return true;
         }
 
+        // The page-edge limit and the slip threshold are for added pictures (those placed with Add
+        // image, the signature and images from the host); `sync_image_selection` has set the
+        // added-content selection when the selected picture is one. Pictures that were in the page
+        // keep the behaviour they had.
+        let placed = view.content.selected.is_some_and(|(selected_page, _)| selected_page == page);
         if let Some(drag) = view.image_selection.as_ref().and_then(|s| s.drag)
             && let Some(p) = hover_pos
         {
             if !obb.is_rotated && !matches!(drag.target, DragTarget::Rotate) {
+                // A move or resize stops at the page edge (what already lies outside stays allowed).
+                let bounds = if placed { xf.rect.union(drag.initial_rect) } else { Rect::EVERYTHING };
                 let preview = match drag.target {
                     DragTarget::Handle(handle) => {
                         let delta = p - drag.start;
                         let is_corner =
                             matches!(handle, ImageHandle::TopLeft | ImageHandle::TopRight | ImageHandle::BottomLeft | ImageHandle::BottomRight);
                         let shift = ui.input(|inp| inp.modifiers.shift);
-                        if is_corner && !shift {
-                            apply_resize_proportional(drag.initial_rect, handle, delta)
-                        } else {
-                            apply_resize(drag.initial_rect, handle, delta)
-                        }
+                        fit_to(bounds, |t| {
+                            let d = delta * t;
+                            let r = if is_corner && !shift {
+                                apply_resize_proportional(drag.initial_rect, handle, d)
+                            } else {
+                                apply_resize(drag.initial_rect, handle, d)
+                            };
+                            (r, r)
+                        })
                     }
-                    DragTarget::Move => drag.initial_rect.translate(p - drag.start),
+                    DragTarget::Move => drag.initial_rect.translate(slide_into(drag.initial_rect, p - drag.start, bounds)),
                     _ => drag.initial_rect,
                 };
 
@@ -874,15 +933,17 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
                 }
 
                 if resp.drag_stopped() || !ptr.primary_down {
+                    // A drag under the slip threshold only selects.
+                    let applies = preview != b && (!placed || moved_enough(xf, drag.start, p));
                     if let Some(s) = view.image_selection.as_mut() {
                         s.drag = None;
                         let norm = |r: Rect| {
                             let ((u0, v0), (u1, v1)) = (xf.screen_to_norm(r.min), xf.screen_to_norm(r.max));
                             Rect::from_two_pos(Pos2::new(u0, v0), Pos2::new(u1, v1))
                         };
-                        s.settled = (preview != b).then(|| (left_at.unwrap_or_else(|| norm(b)), norm(preview)));
+                        s.settled = applies.then(|| (left_at.unwrap_or_else(|| norm(b)), norm(preview)));
                     }
-                    if preview != b {
+                    if applies {
                         view.pending_edit =
                             Some(Edit::EditPageImage { page, index: i, change: pdfcraft_engine::ImageEdit::Move(user_box(xf, info, page, target)) });
                     }
@@ -901,18 +962,25 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
             let (sx, sy) = screen_to_user(xf, info, page, drag.start);
             let (px, py) = screen_to_user(xf, info, page, p);
 
-            let (m_new, cursor_icon) = match drag.target {
-                DragTarget::Move => {
-                    let (dx, dy) = (px - sx, py - sy);
-                    (Matrix([a0, b0, c0, d0, e0 + dx, f0 + dy]), egui::CursorIcon::Move)
-                }
-                DragTarget::Handle(handle) => {
-                    let proportional = !ui.input(|input| input.modifiers.shift);
-                    let resized = resize_affine_frame(m_init, handle, (px - sx, py - sy), proportional).unwrap_or(m_init);
-                    (resized, obb.handle_cursor(handle))
-                }
+            let (dx, dy) = (px - sx, py - sy);
+            let proportional = !ui.input(|input| input.modifiers.shift);
+            let bounds = if placed { bbox(&obb.corners()).map_or(xf.rect, |r| xf.rect.union(r)) } else { Rect::EVERYTHING };
+            let build = |t: f32| {
+                let t = f64::from(t);
+                let m = match drag.target {
+                    DragTarget::Move => Matrix([a0, b0, c0, d0, e0 + dx * t, f0 + dy * t]),
+                    DragTarget::Handle(handle) => resize_affine_frame(m_init, handle, (dx * t, dy * t), proportional).unwrap_or(m_init),
+                    DragTarget::Rotate => m_init,
+                };
+                let r = bbox(&ImageObb::from_matrix(m.0, xf, info, page).corners()).unwrap_or(bounds);
+                (m, r)
+            };
+            let m_new = fit_to(bounds, build);
+            let cursor_icon = match drag.target {
+                DragTarget::Move => egui::CursorIcon::Move,
+                DragTarget::Handle(handle) => obb.handle_cursor(handle),
                 // Turning is handled above.
-                DragTarget::Rotate => (m_init, egui::CursorIcon::Default),
+                DragTarget::Rotate => egui::CursorIcon::Default,
             };
 
             let preview_obb = ImageObb::from_matrix(m_new.0, xf, info, page);
@@ -935,9 +1003,9 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
                 if let Some(s) = view.image_selection.as_mut() {
                     s.drag = None;
                 }
-                if m_new.0 != drag.initial_matrix {
+                if m_new.0 != drag.initial_matrix && (!placed || dx.hypot(dy) >= f64::from(SLIP_PT)) {
                     if matches!(drag.target, DragTarget::Move) {
-                        let (dx, dy) = (px - sx, py - sy);
+                        let (dx, dy) = (m_new.0[4] - e0, m_new.0[5] - f0);
                         let new_rect = [image.rect[0] + dx, image.rect[1] + dy, image.rect[2] + dx, image.rect[3] + dy];
                         view.pending_edit = Some(Edit::EditPageImage { page, index: i, change: pdfcraft_engine::ImageEdit::Move(new_rect) });
                     } else if let Some(inv) = Matrix(drag.initial_matrix).invert() {
@@ -1158,6 +1226,42 @@ mod screen_orientation_tests {
         for rotation in [0, 90, 180, 270] {
             assert_eq!(flip_user_axis(true, rotation), rotation % 180 == 0);
             assert_eq!(flip_user_axis(false, rotation), rotation % 180 != 0);
+        }
+    }
+
+    #[test]
+    fn a_move_slides_along_the_page_edge_and_may_not_leave_it() {
+        let page = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0));
+        let r = Rect::from_min_max(pos2(10.0, 10.0), pos2(30.0, 30.0));
+        assert_eq!(slide_into(r, egui::vec2(500.0, 20.0), page), egui::vec2(70.0, 20.0));
+        assert_eq!(slide_into(r, egui::vec2(-500.0, -500.0), page), egui::vec2(-10.0, -10.0));
+        assert_eq!(slide_into(r, egui::vec2(f32::NAN, 5.0), page), egui::vec2(0.0, 5.0));
+        // Already partly outside: it may come back, not go further out.
+        let out = Rect::from_min_max(pos2(-10.0, 10.0), pos2(10.0, 30.0));
+        let bounds = page.union(out);
+        assert_eq!(slide_into(out, egui::vec2(-5.0, 0.0), bounds), egui::vec2(0.0, 0.0));
+        assert_eq!(slide_into(out, egui::vec2(15.0, 0.0), bounds), egui::vec2(15.0, 0.0));
+    }
+
+    #[test]
+    fn a_proportional_corner_resize_stops_at_the_page_edge_and_stays_square() {
+        let page = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0));
+        let r = Rect::from_min_max(pos2(10.0, 10.0), pos2(30.0, 30.0));
+        let out = fit_to(page, |t| {
+            let r = apply_resize_proportional(r, ImageHandle::BottomRight, egui::vec2(500.0, 500.0) * t);
+            (r, r)
+        });
+        assert!(inside(out, page), "{out:?}");
+        assert!((out.width() - out.height()).abs() < 0.01, "{out:?}");
+        assert!(out.max.x > 99.0, "it grows to the edge: {out:?}");
+    }
+
+    #[test]
+    fn the_slip_threshold_is_two_points_at_any_zoom() {
+        for zoom in [0.5_f32, 1.0, 2.0] {
+            let xf = PageXform { rect: Rect::from_min_size(Pos2::ZERO, egui::vec2(100.0 * zoom, 100.0 * zoom)), rot: 0, pw: 100.0, ph: 100.0 };
+            assert!(!moved_enough(&xf, Pos2::ZERO, pos2(1.9 * zoom, 0.0)), "{zoom}");
+            assert!(moved_enough(&xf, Pos2::ZERO, pos2(2.0 * zoom, 0.0)), "{zoom}");
         }
     }
 }

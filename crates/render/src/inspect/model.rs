@@ -341,6 +341,10 @@ pub struct Annotation {
     /// The points that shape a line (its two ends, `/L`) or connected lines, a polygon or a
     /// cloud (their corners, `/Vertices`), in user space; empty for other comments.
     pub points: Vec<[f32; 2]>,
+    /// A note's pop-up (a Text annotation that is not a reply): its `/Rect` in user space and
+    /// whether it is open; `None` for other comments. A note with no pop-up reads as open if its
+    /// own `/Open` is true, at the default place (`pdfcraft_annot::default_popup_rect`).
+    pub popup: Option<([f32; 4], bool)>,
 }
 
 impl Annotation {

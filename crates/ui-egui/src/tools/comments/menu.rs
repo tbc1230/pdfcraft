@@ -1,9 +1,9 @@
 use super::input::delete_selected;
 use super::paint::edit_anchor;
-use super::state::{Composer, ComposerKind, Gesture};
+use super::state::{Composer, ComposerKind, Gesture, PageCx};
 use super::{
-    Annotation, Color32, CommentPrefs, CommentTool, DocInfo, DocView, Edit, Rect, Rgb, SELECT_BLUE, SWATCHES, Sense, Stroke, color32, icons, theme,
-    vec2,
+    Annotation, Color32, CommentPrefs, CommentTool, DocInfo, DocView, Edit, PagePointer, QuickTool, Rect, Rgb, SELECT_BLUE, SWATCHES, Sense, Stroke,
+    color32, icons, theme, vec2,
 };
 
 /// Save attachment… and, for a PDF, Open in a new tab, first in a file attachment comment's
@@ -87,6 +87,30 @@ pub(crate) fn context_menu(
                     focus: true,
                 });
                 ui.close();
+            }
+            // A note is closed (its icon) or opened (its pop-up on the page).
+            if a.subtype == "Text" && !a.is_reply() {
+                let open = a.popup.is_some_and(|(_, open)| open);
+                if ui.add_enabled(allowed && !a.locked, egui::Button::new(tl!(if open { "Close note" } else { "Open note" }))).clicked() {
+                    if let Some(xf) = view.page_xform(page) {
+                        let cx = PageCx {
+                            page,
+                            xf: &xf,
+                            ptr: &PagePointer::default(),
+                            info,
+                            tool: QuickTool::Select,
+                            prefs: _prefs,
+                            allowed,
+                            hidden: false,
+                            redact_mark: ([0.89, 0.13, 0.13], 1.0),
+                        };
+                        view.pending_edit = Some(super::input::popup_edit(&cx, a, !open));
+                    } else {
+                        // Its page is not on screen: no placement to fit, the engine's default does.
+                        view.pending_edit = Some(Edit::SetNotePopup { page, index, open: !open, rect: None });
+                    }
+                    ui.close();
+                }
             }
             // No reply on a text box; without permission to annotate the entry is greyed out.
             if crate::comments_panel::takes_replies(a) && ui.add_enabled(allowed, egui::Button::new(tl!("Reply"))).clicked() {

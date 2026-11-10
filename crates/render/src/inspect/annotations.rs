@@ -158,6 +158,21 @@ impl<'a> Inspector<'a> {
                 }
                 _ => Vec::new(),
             };
+            let popup = if subtype == "Text" && d.get(b"IRT").is_err() {
+                let open = |o: &Dictionary| matches!(o.get(b"Open").map(|v| self.resolve(v)), Ok(Object::Boolean(true)));
+                let default = [rect[2] + 10.0, rect[3] - 120.0, rect[2] + 210.0, rect[3]];
+                match d.get(b"Popup").ok().and_then(|o| self.dict(o)) {
+                    Some(pd) => {
+                        let r = pd.get(b"Rect").map(|o| rect4(self.resolve(o))).unwrap_or([0.0; 4]);
+                        let usable =
+                            r[0].is_finite() && r[1].is_finite() && r[2].is_finite() && r[3].is_finite() && r[2] - r[0] >= 1.0 && r[3] - r[1] >= 1.0;
+                        Some((if usable { r } else { default }, open(pd)))
+                    }
+                    None => Some((default, open(d))),
+                }
+            } else {
+                None
+            };
             let annotation = Annotation {
                 page,
                 subtype,
@@ -180,6 +195,7 @@ impl<'a> Inspector<'a> {
                 fill_sign,
                 no_rotate: d.get(b"F").is_ok_and(|f| draw_flags(self.resolve(f)) & 16 != 0),
                 points,
+                popup,
             };
             kept = kept.saturating_add(retained(&annotation));
             if kept > MAX_ANNOTATION_BYTES {

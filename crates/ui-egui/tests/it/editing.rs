@@ -2809,61 +2809,6 @@ fn the_security_notice_unlocks_with_the_permissions_password() {
     assert!(!h.state().session.get(h.state().active_ids().unwrap().1).unwrap().dirty, "unlocking is not an edit");
 }
 
-/// #4035: the secured-document notice can be turned off for good. "Don't show again" hides it
-/// in every document, the choice is kept in the settings and turned back on in Preferences (or
-/// `--secured-notice`); the document stays restricted and Properties ▸ Security still opens.
-#[test]
-fn the_security_notice_can_be_turned_off_for_good() {
-    let open = |settings: Option<String>| {
-        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
-            let mut app = PdfCraftApp::new();
-            if let Some(s) = &settings {
-                app.restore(s);
-            }
-            app.set_option("language", "en").unwrap();
-            app.open_bytes("locked.pdf", None, protected("", "owner", 0b0100)).unwrap();
-            app
-        });
-        h.run_steps(4);
-        h
-    };
-    let mut h = open(None);
-    assert!(h.state().show_secured_notice, "on by default");
-    h.get_by_label_contains("This document is secured");
-    h.get_by_label("Don't show again").click();
-    h.run_steps(2);
-    assert!(h.query_by_label_contains("This document is secured").is_none());
-    assert!(!h.state().show_secured_notice);
-    let id = h.state().active_ids().unwrap().1;
-    assert!(h.state().session.get(id).unwrap().security_summary().is_some_and(|s| !s.owner), "still restricted");
-    h.state_mut().set_option("dialog", "properties").unwrap();
-    h.run_steps(2);
-    h.get_by_label("Security").click();
-    h.run_steps(3);
-    h.get_by_label("Password security");
-    h.get_by_label("User password");
-    // Kept in the settings: a later session opens the same file without the notice.
-    let saved = h.state().persist();
-    let mut h = open(Some(saved));
-    assert!(h.query_by_label_contains("This document is secured").is_none(), "remembered across a restart");
-    // Back on from Preferences.
-    h.state_mut().set_option("dialog", "preferences").unwrap();
-    h.run_steps(2);
-    h.get_by_role_and_label(Role::CheckBox, "Show a notice when a document is secured").scroll_to_me();
-    h.run_steps(4);
-    h.get_by_role_and_label(Role::CheckBox, "Show a notice when a document is secured").click();
-    h.run_steps(2);
-    assert!(h.state().show_secured_notice);
-    h.state_mut().dialog = None;
-    h.run_steps(2);
-    h.get_by_label_contains("This document is secured");
-    // Scriptable, with a clear refusal for anything else.
-    let app = h.state_mut();
-    app.set_option("secured-notice", "false").unwrap();
-    assert!(!app.show_secured_notice);
-    assert_eq!(app.set_option("secured-notice", "maybe"), Err("secured-notice must be true or false".into()));
-}
-
 /// Changing a restricted document's security asks for its permissions password first (Acrobat
 /// does too), then carries on.
 #[test]
@@ -2904,7 +2849,7 @@ fn a_secured_form_shows_its_form_notice_and_its_security() {
         app
     });
     h.run_steps(4);
-    h.get_by_label_contains("interactive form fields. This document is secured. Some changes are restricted by its security settings.");
+    h.get_by_label_contains("interactive form fields. This document is secured. This document's security settings restrict some actions.");
     h.get_by_label("Hide field highlights");
     h.get_by_label("Security settings");
     h.get_by_label("Unlock…");
@@ -10082,4 +10027,212 @@ fn undo_and_redo_are_not_available_when_there_is_nothing_to_undo_or_redo() {
     h.state_mut().redo();
     h.run_steps(2);
     assert!(command_enabled(&h, "edit.undo") && !command_enabled(&h, "edit.redo"));
+}
+
+// -- Markup stays on its page when pages are moved, inserted or deleted --------------------------
+
+/// A rectangle markup item on `page`, `x` points from the left, with its author and text.
+fn add_marked(app: &mut PdfCraftApp, page: usize, x: f64, author: &str, text: &str) -> bool {
+    let shape = pdfcraft_engine::Shape::Rectangle { rect: [x, 10.0, x + 40.0, 50.0] };
+    let style = pdfcraft_engine::Style::default_for(&shape);
+    app.apply_edit(pdfcraft_engine::Edit::AddAnnotation(pdfcraft_engine::NewAnnotation {
+        page,
+        shape,
+        style,
+        contents: text.into(),
+        author: author.into(),
+    }))
+}
+
+type Marks = Vec<(usize, String, String, [f32; 4])>;
+
+/// The markup items of `info` as (page, author, text, place), by page.
+fn marks_of(info: &pdfcraft_render::DocInfo) -> Marks {
+    let mut marks: Marks = info
+        .annotations
+        .iter()
+        .filter(|a| a.subtype == "Square")
+        .map(|a| (a.page, a.author.clone().unwrap_or_default(), a.contents.clone().unwrap_or_default(), a.rect))
+        .collect();
+    marks.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    marks
+}
+
+fn markup(h: &Harness<'static, PdfCraftApp>) -> Marks {
+    let app = h.state();
+    marks_of(&app.session.get(app.views[0].id).unwrap().info)
+}
+
+fn page_count(h: &Harness<'static, PdfCraftApp>) -> usize {
+    let app = h.state();
+    app.session.get(app.views[0].id).unwrap().info.pages.len()
+}
+
+/// The markup item moves with its page: page 2 of 3 goes to the end, and the item is on the moved
+/// page, now page 3, at the same place. Undo puts it back with its page, redo moves it again.
+#[test]
+fn markup_moves_with_its_page_when_the_page_is_moved() {
+    let mut h = harness(3, |_| {});
+    assert!(add_marked(h.state_mut(), 1, 20.0, "Ann", "on page two"));
+    h.run_steps(2);
+    let before = markup(&h);
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].0, 1);
+    assert!(h.state_mut().apply_edit(pdfcraft_engine::Edit::MovePages { pages: vec![1], to: 2 }));
+    h.run_steps(2);
+    let moved = markup(&h);
+    assert_eq!(moved, [(2, "Ann".to_string(), "on page two".to_string(), before[0].3)], "on the moved page, at the same place");
+    h.state_mut().undo();
+    h.run_steps(2);
+    assert_eq!(markup(&h), before, "undo puts it back with its page");
+    h.state_mut().redo();
+    h.run_steps(2);
+    assert_eq!(markup(&h), moved, "redo moves it again");
+}
+
+/// Markup of a deleted page goes with it (and out of the comments panel's list, which is the
+/// document's markup); the other pages' markup stays on its page, now one earlier. Undo brings the
+/// page back with its markup at the earlier place, redo deletes it again.
+#[test]
+fn markup_goes_with_a_deleted_page_and_comes_back_on_undo() {
+    let mut h = harness(3, |_| {});
+    assert!(add_marked(h.state_mut(), 0, 20.0, "Ann", "first"));
+    assert!(add_marked(h.state_mut(), 1, 100.0, "Ann", "second"));
+    h.run_steps(2);
+    let before = markup(&h);
+    assert_eq!(before.iter().map(|m| (m.0, m.2.as_str())).collect::<Vec<_>>(), [(0, "first"), (1, "second")]);
+    assert!(h.state_mut().apply_edit(pdfcraft_engine::Edit::DeletePages { pages: vec![0] }));
+    h.run_steps(2);
+    let after = markup(&h);
+    assert_eq!(after, [(0, "Ann".to_string(), "second".to_string(), before[1].3)], "page 1's markup is gone, page 2's is on page 1");
+    h.state_mut().undo();
+    h.run_steps(2);
+    assert_eq!(markup(&h), before, "the page returns with its markup at its earlier place");
+    h.state_mut().redo();
+    h.run_steps(2);
+    assert_eq!(markup(&h), after, "redo deletes it again");
+}
+
+/// A blank page before page 1, by the new command and by the engine's edit: the markup stays on its
+/// original page, now page 2, and the inserted page has none. The inserted page is selected.
+/// Undo takes the blank page out and the markup is on page 1 again; redo inserts it again.
+#[test]
+fn a_blank_page_before_page_one_leaves_the_markup_on_its_page() {
+    for by_command in [true, false] {
+        let mut h = harness(2, |_| {});
+        assert!(add_marked(h.state_mut(), 0, 20.0, "Ann", "on page one"));
+        h.run_steps(2);
+        let before = markup(&h);
+        if by_command {
+            h.state_mut().views[0].select_pages(&[0]);
+            assert!(h.state_mut().execute("page.insert_blank_before"));
+        } else {
+            assert!(h.state_mut().apply_edit(pdfcraft_engine::Edit::InsertBlankPage { at: 0, width: 200.0, height: 300.0 }));
+        }
+        h.run_steps(2);
+        let after = markup(&h);
+        assert_eq!(after, [(1, "Ann".to_string(), "on page one".to_string(), before[0].3)], "by_command={by_command}");
+        assert_eq!(page_count(&h), 3);
+        if by_command {
+            assert_eq!(h.state().views[0].selected.iter().copied().collect::<Vec<_>>(), [0], "the inserted page is selected");
+        }
+        h.state_mut().undo();
+        h.run_steps(2);
+        assert_eq!((markup(&h), page_count(&h)), (before.clone(), 2), "undo, by_command={by_command}");
+        h.state_mut().redo();
+        h.run_steps(2);
+        assert_eq!((markup(&h), page_count(&h)), (after, 3), "redo, by_command={by_command}");
+    }
+}
+
+/// "Insert a blank page before the selection" goes before the first selected page, or the current
+/// page when none is selected, with that page's size, and the new page is selected.
+#[test]
+fn a_blank_page_before_the_selection_takes_the_size_of_the_first_selected_page() {
+    let sized = || {
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_cc| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", "en").unwrap();
+            app.open_bytes("sized.pdf", None, sized_pages()).unwrap();
+            app
+        });
+        h.run_steps(4);
+        h
+    };
+    let selected = |h: &Harness<'static, PdfCraftApp>| h.state().views[0].selected.iter().copied().collect::<Vec<_>>();
+    // Page 2 selected: before it, 400x300.
+    let mut h = sized();
+    h.state_mut().views[0].select_pages(&[1]);
+    assert!(h.state_mut().execute("page.insert_blank_before"));
+    assert_eq!(page_sizes(h.state()), [(200.0, 300.0), (400.0, 300.0), (400.0, 300.0), (300.0, 300.0)]);
+    assert_eq!(selected(&h), [1]);
+    h.state_mut().undo();
+    assert_eq!(page_sizes(h.state()).len(), 3, "one undo takes the blank page out");
+    // Pages 2 and 3 selected: before the first of them, 400x300.
+    let mut h = sized();
+    h.state_mut().views[0].select_pages(&[1, 2]);
+    assert!(h.state_mut().execute("page.insert_blank_before"));
+    assert_eq!(page_sizes(h.state()), [(200.0, 300.0), (400.0, 300.0), (400.0, 300.0), (300.0, 300.0)]);
+    // Page 3 selected: before it, 300x300.
+    let mut h = sized();
+    h.state_mut().views[0].select_pages(&[2]);
+    assert!(h.state_mut().execute("page.insert_blank_before"));
+    assert_eq!(page_sizes(h.state()), [(200.0, 300.0), (400.0, 300.0), (300.0, 300.0), (300.0, 300.0)]);
+    // Nothing selected, page 2 current: before page 2.
+    let mut h = sized();
+    h.state_mut().set_option("page", "2").unwrap();
+    h.run_steps(2);
+    assert!(h.state_mut().execute("page.insert_blank_before"));
+    assert_eq!(page_sizes(h.state()), [(200.0, 300.0), (400.0, 300.0), (400.0, 300.0), (300.0, 300.0)]);
+}
+
+/// Pages inserted from another PDF keep their markup at the same place with author and text, and the
+/// document's own markup stays put. Undo takes the pages and their markup out, redo brings both back.
+#[test]
+fn pages_inserted_from_another_pdf_keep_their_markup() {
+    let mut source = pdfcraft_engine::Session::new();
+    let src = source.open("src.pdf", None, std::sync::Arc::new(fixture(2)), None).unwrap();
+    let shape = pdfcraft_engine::Shape::Rectangle { rect: [60.0, 10.0, 100.0, 50.0] };
+    let style = pdfcraft_engine::Style::default_for(&shape);
+    source
+        .apply(
+            src,
+            pdfcraft_engine::Edit::AddAnnotation(pdfcraft_engine::NewAnnotation {
+                page: 0,
+                shape,
+                style,
+                contents: "from the other file".into(),
+                author: "Src".into(),
+            }),
+        )
+        .unwrap();
+    let theirs = marks_of(&source.get(src).unwrap().info);
+    assert_eq!(theirs.len(), 1);
+    let bytes = source.save_bytes(src).unwrap();
+
+    let mut h = harness(2, |_| {});
+    assert!(add_marked(h.state_mut(), 0, 20.0, "Mine", "own"));
+    h.run_steps(2);
+    let own = markup(&h);
+    let edit = pdfcraft_engine::Edit::InsertPagesFrom {
+        name: "src.pdf".into(),
+        bytes,
+        pages: None,
+        at: 1,
+        field_conflicts: pdfcraft_engine::FieldConflicts::Rename,
+        password: None,
+    };
+    assert!(h.state_mut().apply_edit(edit));
+    h.run_steps(2);
+    assert_eq!(page_count(&h), 4);
+    let both = markup(&h);
+    assert_eq!(both.len(), 2, "{both:?}");
+    assert_eq!(both[0], own[0], "the document's own markup stays put");
+    assert_eq!((both[1].0, both[1].1.as_str(), both[1].2.as_str(), both[1].3), (1, "Src", "from the other file", theirs[0].3));
+    h.state_mut().undo();
+    h.run_steps(2);
+    assert_eq!((markup(&h), page_count(&h)), (own, 2), "undo takes the pages and their markup out");
+    h.state_mut().redo();
+    h.run_steps(2);
+    assert_eq!((markup(&h), page_count(&h)), (both, 4), "redo brings both back");
 }

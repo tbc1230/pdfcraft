@@ -99,7 +99,7 @@ fn main() {
                         {
                             app.comment_prefs.author = author.chars().take(200).collect();
                         }
-                        bridge.listen(app.startup_inbox.clone(), cc.egui_ctx.clone());
+                        bridge.listen(app.startup_inbox.clone(), app.host_calls.clone(), cc.egui_ctx.clone());
                         app.host_save = Some(bridge.save_fn());
                         app.host_dirty = Some(bridge.dirty_fn());
                         bridge.post_ready();
@@ -274,7 +274,9 @@ fn app_canvas() -> Option<web_sys::HtmlCanvasElement> {
 /// - `pdfcraft:ready` once the app is listening; send files now. PdfCraft reads bytes, so it
 ///   says `file: false` and a host sends `bytes`.
 /// - `pdfcraft:open` (from the host): `{ name, bytes }` holding a PDF. It opens in a tab, like a
-///   `?file=` URL; a file over [`host::MAX_OPEN_BYTES`] is refused before it is copied.
+///   `?file=` URL; a file over [`host::MAX_OPEN_BYTES`] is refused before it is copied. An
+///   encrypted file raises the editor's own password prompt (the password never leaves the
+///   editor); when the user cancels it the editor sends `pdfcraft:open-failed` (see `host_api`).
 /// - `pdfcraft:save` (to the host): `{ name, saveAs, bytes }` when the user saves. The host stores
 ///   the file (and reports its own errors).
 /// - `pdfcraft:dirty` whenever unsaved work appears or goes away, `pdfcraft:failed` when the app
@@ -317,11 +319,13 @@ mod host {
             let _ = self.host.post_failed(error, None);
         }
 
-        /// Hear `pdfcraft:open` and queue the file like a `?file=` download.
-        pub fn listen(&self, inbox: pdfcraft_ui_egui::Inbox, ctx: egui::Context) {
+        /// Hear `pdfcraft:open` and queue the file like a `?file=` download. `calls` remembers
+        /// the names of these files, so that the app can tell the page when the user cancels the
+        /// password prompt of one (`pdfcraft:open-failed`).
+        pub fn listen(&self, inbox: pdfcraft_ui_egui::Inbox, calls: pdfcraft_ui_egui::HostCalls, ctx: egui::Context) {
             self.host.listen(move |message| {
                 if let Message::Open { name, data } = message {
-                    queue_open(&name, &data, &inbox, &ctx);
+                    queue_open(&name, &data, &inbox, &calls, &ctx);
                 }
             });
         }
@@ -347,7 +351,7 @@ mod host {
     /// The `pdfcraft:open` payload, `{ name, bytes }` where `bytes` holds a PDF: queue it like a
     /// `?file=` download and wake the app. The crate has cleaned the name (and cut it to 255
     /// characters); a blank one comes as `document` and becomes `document.pdf`.
-    fn queue_open(name: &str, data: &FileData, inbox: &pdfcraft_ui_egui::Inbox, ctx: &egui::Context) {
+    fn queue_open(name: &str, data: &FileData, inbox: &pdfcraft_ui_egui::Inbox, calls: &pdfcraft_ui_egui::HostCalls, ctx: &egui::Context) {
         let name = if name == "document" { DEFAULT_NAME } else { name }.to_string();
         let FileData::Bytes(view) = data else {
             eframe::web_sys::console::warn_1(&format!("PdfCraft: host file {name} came as a File; PdfCraft reads bytes only; not opened").into());
@@ -360,6 +364,9 @@ mod host {
             );
             return;
         }
+        // Remembered before the file is queued: an encrypted file raises the editor's password
+        // prompt, and cancelling that prompt is told to the page under this name.
+        calls.expect_open(&name);
         if let Ok(mut q) = inbox.lock() {
             q.push((name, view.to_vec()));
         }

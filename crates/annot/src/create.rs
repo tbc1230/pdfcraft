@@ -234,7 +234,7 @@ pub fn add_annotation(doc: &mut Document, new: &NewAnnotation, meta: &Meta) -> R
             d.set(b"Name".to_vec(), Object::name(icon.name()));
             d.set(b"F".to_vec(), Object::Int(FLAG_PRINT | FLAG_NO_ZOOM | FLAG_NO_ROTATE));
             d.set(b"Open".to_vec(), Object::Bool(false));
-            popup = Some([rect[2] + 10.0, rect[3] - 120.0, rect[2] + 210.0, rect[3]]);
+            popup = Some(super::info::default_popup_rect(rect));
         }
         Shape::TextMarkup { quads, .. } => {
             d.set(b"C".to_vec(), rgb(style.color));
@@ -450,7 +450,7 @@ fn set_redaction_properties(dict: &mut Dict, style: &Style, quads: &[[f64; 8]], 
     }
 }
 
-fn add_popup(doc: &mut Document, parent: ObjRef, rect: Option<[f64; 4]>, annots: &mut Vec<Object>) -> Result<(), AnnotError> {
+pub(crate) fn add_popup(doc: &mut Document, parent: ObjRef, rect: Option<[f64; 4]>, annots: &mut Vec<Object>) -> Result<(), AnnotError> {
     let Some(rect) = rect else { return Ok(()) };
     let mut popup = Dict::new();
     popup.set(b"Type".to_vec(), Object::name("Annot"));

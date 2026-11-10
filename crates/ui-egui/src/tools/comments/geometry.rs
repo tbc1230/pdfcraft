@@ -7,8 +7,135 @@ pub(super) fn is_markup(subtype: &str) -> bool {
 
 /// Rectangles, ovals, text boxes, stamps and drawings (drawn signatures among them). A callout's
 /// `/Rect` also holds its leader line, so it only moves.
+/// A locked comment shows no handles ([`reshapable`] too).
 pub(super) fn resizable(a: &Annotation) -> bool {
-    matches!(a.subtype.as_str(), "Square" | "Circle" | "FreeText" | "Stamp" | "Ink") && a.intent.as_deref() != Some("FreeTextCallout")
+    matches!(a.subtype.as_str(), "Square" | "Circle" | "FreeText" | "Stamp" | "Ink") && a.intent.as_deref() != Some("FreeTextCallout") && !a.locked
+}
+
+/// A drag changes nothing unless the pointer travelled this far, in page points (the same slip
+/// threshold as drawing a shape: a side under 2 pt is no shape). A click only selects.
+pub(super) const SLIP_PT: f32 = 2.0;
+
+/// Whether the pointer travelled `from` -> `to` (screen) beyond [`SLIP_PT`] at `zoom` (screen
+/// pixels per page point). A page with no size on screen moves nothing.
+pub(super) fn slipped(from: Pos2, to: Pos2, zoom: f32) -> bool {
+    zoom.is_finite() && zoom > 0.0 && from.distance(to) / zoom >= SLIP_PT
+}
+
+/// `d` cut down so that `r` moved by it stays inside `bounds` (the page as shown). A box larger
+/// than the page on an axis is held to the page's edge it started nearest, so it still moves
+/// toward the page.
+pub(super) fn slide_within(r: Rect, d: egui::Vec2, bounds: Rect) -> egui::Vec2 {
+    let axis = |lo: f32, hi: f32, d: f32, b_lo: f32, b_hi: f32| {
+        let (least, most) = (b_lo - lo, b_hi - hi);
+        if least <= most { d.clamp(least, most) } else { d.clamp(most, least) }
+    };
+    if !(d.x.is_finite() && d.y.is_finite()) {
+        return egui::Vec2::ZERO;
+    }
+    vec2(axis(r.left(), r.right(), d.x, bounds.left(), bounds.right()), axis(r.top(), r.bottom(), d.y, bounds.top(), bounds.bottom()))
+}
+
+/// `r` (a resized box, whose `anchor` corner or side stays put) cut back to `bounds`: by pulling
+/// the dragged sides in, and, when `ratio` holds the proportions, by scaling about the anchor.
+pub(super) fn fit_within(r: Rect, handle: (i8, i8), bounds: Rect, ratio: Option<f32>) -> Rect {
+    let mut out = Rect::from_min_max(r.min.max(bounds.min), r.max.min(bounds.max));
+    if let Some(ratio) = ratio.filter(|v| v.is_finite() && *v > 0.0)
+        && handle.0 != 0
+        && handle.1 != 0
+        && (out.width() < r.width() - 0.01 || out.height() < r.height() - 0.01)
+    {
+        let width = out.width().min(out.height() * ratio);
+        let anchor = handle_pos(r, (-handle.0, -handle.1));
+        out = Rect::from_two_pos(anchor, anchor + vec2(f32::from(handle.0) * width, f32::from(handle.1) * width / ratio));
+    }
+    out
+}
+
+/// A pop-up's title bar and close control, in screen pixels.
+pub(super) const POPUP_BAR: f32 = 22.0;
+pub(super) const POPUP_CLOSE: f32 = 16.0;
+/// The least side of a pop-up in page points (the engine refuses less).
+pub(super) const POPUP_MIN_PT: f32 = 40.0;
+/// The grip of a pop-up's edges and corners, in screen pixels.
+const POPUP_GRIP: f32 = 6.0;
+
+/// What of an opened note's pop-up lies under a point (the router's pop-up
+/// [`CommentPart`](crate::page_router::CommentPart)s).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PopupPart {
+    Close,
+    Text,
+    Bar,
+    Edge(i8, i8),
+}
+
+impl PopupPart {
+    pub(super) fn part(self) -> crate::page_router::CommentPart {
+        use crate::page_router::CommentPart;
+        match self {
+            Self::Close => CommentPart::PopupClose,
+            Self::Text => CommentPart::PopupText,
+            Self::Bar => CommentPart::PopupBar,
+            Self::Edge(x, y) => CommentPart::PopupEdge(x, y),
+        }
+    }
+
+    /// The pop-up part a router part of a note means.
+    pub(super) fn of(part: crate::page_router::CommentPart) -> Option<Self> {
+        use crate::page_router::CommentPart;
+        match part {
+            CommentPart::PopupClose => Some(Self::Close),
+            CommentPart::PopupText => Some(Self::Text),
+            CommentPart::PopupBar => Some(Self::Bar),
+            CommentPart::PopupEdge(x, y) => Some(Self::Edge(x, y)),
+            CommentPart::Body | CommentPart::Handle(..) | CommentPart::Point(_) => None,
+        }
+    }
+}
+
+pub(super) fn popup_close_rect(r: Rect) -> Rect {
+    Rect::from_center_size(pos2(r.right() - POPUP_BAR / 2.0, r.top() + POPUP_BAR / 2.0), vec2(POPUP_CLOSE, POPUP_CLOSE))
+}
+
+/// The part of the pop-up at screen rectangle `r` under `p`, `None` outside it. `grips`: the edges
+/// and the title bar take presses (the note may be changed); without, only the text is hit.
+pub(super) fn popup_part(r: Rect, p: Pos2, grips: bool) -> Option<PopupPart> {
+    if !r.expand(POPUP_GRIP / 2.0).contains(p) {
+        return None;
+    }
+    if !grips {
+        return r.contains(p).then_some(PopupPart::Text);
+    }
+    // Corners and sides: a grip band straddling the outline, so a thin pop-up can be grabbed.
+    let near = |v: f32, lo: f32, hi: f32| -> i8 {
+        if (v - lo).abs() <= POPUP_GRIP {
+            -1
+        } else if (v - hi).abs() <= POPUP_GRIP {
+            1
+        } else {
+            0
+        }
+    };
+    let (hx, hy) = (near(p.x, r.left(), r.right()), near(p.y, r.top(), r.bottom()));
+    if popup_close_rect(r).expand(2.0).contains(p) {
+        return Some(PopupPart::Close);
+    }
+    if hx != 0 || hy != 0 {
+        return Some(PopupPart::Edge(hx, hy));
+    }
+    Some(if p.y <= r.top() + POPUP_BAR { PopupPart::Bar } else { PopupPart::Text })
+}
+
+/// `r`, dragged by `handle`, at least `min` on each side: the side that was dragged gives way.
+pub(super) fn at_least(mut r: Rect, handle: (i8, i8), min: f32) -> Rect {
+    if r.width() < min {
+        if handle.0 < 0 { r.min.x = r.max.x - min } else { r.max.x = r.min.x + min }
+    }
+    if r.height() < min {
+        if handle.1 < 0 { r.min.y = r.max.y - min } else { r.max.y = r.min.y + min }
+    }
+    r
 }
 
 /// Lines, connected lines, polygons and clouds: their ends and corners have handles of their own

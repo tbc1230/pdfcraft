@@ -84,7 +84,7 @@ mod workflows;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod os_clipboard;
 
-pub use app::host_calls::{HostCall, HostCalls, HostPassword, HostStateFn, SavedBytes, no_document_state};
+pub use app::host_calls::{HostCall, HostCalls, HostEvent, HostPassword, HostStateFn, SavedBytes, no_document_state};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use app::same_file;
 pub(crate) use app::{MAX_AUTHOR_CHARS, copy_refused, date_text_for_pdf, print_refused};
@@ -394,9 +394,6 @@ pub struct PdfCraftApp {
     /// Preferences: ask for a newer release when the desktop app starts (#5737). Off, the app
     /// asks only from Help ▸ Check for updates.
     pub update_check_at_start: bool,
-    /// Preferences: tell the user, above the pages, that a document is secured (its security
-    /// settings restrict changes). Off only hides that notice (#4035); kept in the settings.
-    pub show_secured_notice: bool,
     /// Preferences: open every document at Default zoom and Default page display, whatever
     /// layout or zoom it asks for (#1618).
     pub always_default_view: bool,

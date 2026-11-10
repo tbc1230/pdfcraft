@@ -4499,11 +4499,88 @@ fn links_from_urls_and_link_edits() {
     assert_eq!(s.get(id).unwrap().links().len(), 1);
     // Link Properties and delete.
     let l = s.get(id).unwrap().links()[0].clone();
-    s.apply(id, Edit::SetLink { page: 0, index: l.index, rect: None, action: Some(LinkAction::Page(0)), style: None }).unwrap();
-    assert_eq!(s.get(id).unwrap().links()[0].action, LinkAction::Page(0));
+    s.apply(id, Edit::SetLink { page: 0, index: l.index, rect: None, action: Some(LinkAction::Page { page: 0, fit: LinkFit::Page }), style: None })
+        .unwrap();
+    assert_eq!(s.get(id).unwrap().links()[0].action, LinkAction::Page { page: 0, fit: LinkFit::Page });
     s.apply(id, Edit::DeleteLink { page: 0, index: l.index }).unwrap();
     assert!(s.get(id).unwrap().links().is_empty());
     assert!(s.apply(id, Edit::RemoveLinks { pages: None }).is_err(), "nothing left to remove");
+}
+
+fn page_link(page: usize, k: usize, to: usize, fit: LinkFit) -> Edit {
+    let x = 10.0 + 30.0 * k as f64;
+    Edit::AddLink { page, rect: [x, 10.0, x + 20.0, 30.0], action: LinkAction::Page { page: to, fit }, style: LinkStyle::default() }
+}
+
+#[test]
+fn a_page_link_keeps_its_area_and_its_fit_when_saved_and_opened_again() {
+    let (mut s, id) = session_with(4);
+    let wanted = [(2, LinkFit::Page), (1, LinkFit::Width), (3, LinkFit::Height)];
+    for (k, (to, fit)) in wanted.iter().enumerate() {
+        s.apply(id, page_link(0, k, *to, *fit)).unwrap();
+        assert_eq!(s.get(id).unwrap().can_undo(), Some("Add link"), "one undo step per link");
+    }
+    let before = s.get(id).unwrap().links().to_vec();
+    let bytes = s.save_bytes(id).unwrap();
+    let mut again = Session::new();
+    let reopened = again.open("x.pdf", None, bytes, None).unwrap();
+    let after = again.get(reopened).unwrap().links().to_vec();
+    assert_eq!(after.len(), 3);
+    for ((a, b), (to, fit)) in before.iter().zip(after.iter()).zip(wanted) {
+        assert_eq!((a.rect, &a.action), (b.rect, &b.action), "the same area and target");
+        assert_eq!(b.action, LinkAction::Page { page: to, fit });
+    }
+    assert_eq!(after[0].rect, [10.0, 10.0, 30.0, 30.0]);
+    // The viewer follows each with its fit.
+    let views: Vec<_> = again.get(reopened).unwrap().info.links.iter().map(|l| l.target.clone()).collect();
+    assert!(matches!(views[0], pdfcraft_render::LinkTarget::Page(2, pdfcraft_render::DestView::Fit)));
+    assert!(matches!(views[1], pdfcraft_render::LinkTarget::Page(1, pdfcraft_render::DestView::FitH { top: None })));
+    assert!(matches!(views[2], pdfcraft_render::LinkTarget::Page(3, pdfcraft_render::DestView::FitV { left: None })));
+    // One undo removes the last link only.
+    s.undo(id).unwrap();
+    assert_eq!(s.get(id).unwrap().links().len(), 2);
+}
+
+#[test]
+fn a_page_link_follows_its_page_when_pages_move_and_loses_it_when_it_is_deleted() {
+    let (mut s, id) = session_with(4);
+    // Four links on page 1 to pages 3, 2, 4 and 3.
+    for (k, to) in [2, 1, 3, 2].into_iter().enumerate() {
+        s.apply(id, page_link(0, k, to, LinkFit::Page)).unwrap();
+    }
+    let goes = |s: &Session| -> Vec<Option<usize>> {
+        s.get(id).unwrap().links().iter().map(|l| if let LinkAction::Page { page, .. } = l.action { Some(page) } else { None }).collect()
+    };
+    assert_eq!(goes(&s), [Some(2), Some(1), Some(3), Some(2)]);
+    // Page 3 moves to the front: its links open it there, the others follow their pages.
+    s.apply(id, Edit::MovePages { pages: vec![2], to: 0 }).unwrap();
+    assert_eq!(goes(&s), [Some(0), Some(2), Some(3), Some(0)]);
+    // Deleting it: its two links have no destination, the other two keep theirs.
+    s.apply(id, Edit::DeletePages { pages: vec![0] }).unwrap();
+    assert_eq!(goes(&s), [None, Some(1), Some(2), None]);
+    let links = s.get(id).unwrap().links();
+    assert!(matches!(links[0].action, LinkAction::Other(_)) && links[0].page == 0);
+}
+
+#[test]
+fn adding_a_link_is_refused_when_the_document_forbids_modification() {
+    let mut s = Session::new();
+    let id = s.open("r.pdf", None, protected("", "owner", 0b0100), None).unwrap();
+    let r = s.apply(id, page_link(0, 0, 1, LinkFit::Page));
+    assert!(matches!(r, Err(EditError::NotPermitted(_))), "{r:?}");
+    assert!(s.get(id).unwrap().links().is_empty());
+    assert!(!s.get(id).unwrap().dirty);
+}
+
+#[test]
+fn a_link_address_that_is_not_a_web_address_is_refused() {
+    let (mut s, id) = session_with(1);
+    for bad in ["example.org", "file:///C:/x.pdf", "javascript:alert(1)", "mailto:a@b.c", "ftp://x.org/f", "https://"] {
+        let edit = Edit::AddLink { page: 0, rect: [10.0, 10.0, 80.0, 30.0], action: LinkAction::Uri(bad.into()), style: LinkStyle::default() };
+        assert!(s.apply(id, edit).is_err(), "{bad}");
+    }
+    assert!(s.get(id).unwrap().links().is_empty());
+    assert!(!s.get(id).unwrap().dirty);
 }
 
 #[test]

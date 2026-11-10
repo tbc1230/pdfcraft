@@ -81,6 +81,7 @@ impl PdfCraftApp {
         // Images and text files become new, unsaved PDFs (Create a PDF).
         let active = self.active;
         if let Some(r) = self.open_converted(name, &bytes) {
+            self.host_calls.settle_open(name);
             if !activate {
                 self.active = active;
             }
@@ -253,9 +254,16 @@ impl PdfCraftApp {
                 });
                 return Ok(());
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => {
+                self.host_calls.settle_open(name);
+                return Err(e.to_string());
+            }
         };
-        self.finish_open(name, path, bytes.len(), prepared, activate).map(|_| ())
+        let opened = self.finish_open(name, path, bytes.len(), prepared, activate).map(|_| ());
+        // Opened or failed: the page's open of this name has its outcome (a password prompt above
+        // keeps it, until the user answers).
+        self.host_calls.settle_open(name);
+        opened
     }
 
     fn finish_open(
@@ -423,6 +431,11 @@ impl PdfCraftApp {
     pub fn submit_password(&mut self, password: Option<String>) {
         let Some(p) = self.password_prompt.take() else { return };
         let Some(pw) = password else {
+            // A file the page sent to open and the user did not unlock: the page is told that the
+            // password was required and nothing opened. The event carries the name only.
+            if self.host_calls.settle_open(&p.name) {
+                self.report_host_event(super::host_calls::HostEvent::PasswordRequired { name: p.name.clone() });
+            }
             // A cancelled recovery goes back on offer; its snapshot stays in the store and must
             // not attach itself to whatever document is unlocked next (#813).
             if let Some(meta) = p.recovered {

@@ -160,7 +160,6 @@ impl PdfCraftApp {
         v["update_check_at_start"] = self.update_check_at_start.into();
         v["hotbar"] = serde_json::to_value(&self.hotbar).unwrap_or_default();
         v["comment_tool_pinned"] = serde_json::Value::Bool(self.comment_prefs.pinned);
-        v["show_secured_notice"] = serde_json::Value::Bool(self.show_secured_notice);
         v["organize_zoom"] = serde_json::json!(self.organize_zoom);
         // Canonical names survive changes to the order of PAPERS and do not depend on UI language.
         v["print_paper"] = serde_json::json!(pdfcraft_engine::print::PAPERS.get(self.print_draft.paper).map(|(name, _)| *name));
@@ -235,9 +234,8 @@ impl PdfCraftApp {
         if let Some(on) = v["update_check_at_start"].as_bool() {
             self.update_check_at_start = on;
         }
-        if let Some(on) = v["show_secured_notice"].as_bool() {
-            self.show_secured_notice = on;
-        }
+        // A `show_secured_notice` that older settings hold is not read: the notice about a
+        // document's restrictions cannot be turned off.
         self.pinned.restore(&v["pinned_folders"]);
         if let Some(items) = v.get("pinned_tools").and_then(serde_json::Value::as_array) {
             let mut tools = Vec::new();

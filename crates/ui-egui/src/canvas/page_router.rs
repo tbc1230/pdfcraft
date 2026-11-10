@@ -79,6 +79,14 @@ pub(crate) enum CommentPart {
     Handle(i8, i8),
     /// A point of the selected line, polygon or cloud.
     Point(usize),
+    /// The title bar of an opened note's pop-up: a drag moves it.
+    PopupBar,
+    /// An edge or corner of an opened note's pop-up, as `Handle`: a drag resizes it.
+    PopupEdge(i8, i8),
+    /// The close control of an opened note's pop-up.
+    PopupClose,
+    /// The text of an opened note's pop-up: a click selects the note, a double-click edits it.
+    PopupText,
 }
 
 /// What lies under a point, for one page module.

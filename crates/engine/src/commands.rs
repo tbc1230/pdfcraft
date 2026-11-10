@@ -393,6 +393,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     c("page.rotate_ccw", "Rotate pages counterclockwise", PAGES, None, Assembly, "rotate-ccw"),
     c("page.delete", "Delete pages", PAGES, None, Assembly, "trash-2"),
     c("page.insert_blank", "Insert blank page", PAGES, None, Assembly, "file-plus"),
+    // Before the first selected page. No menu entry of its own: it is run from the Organize pages
+    // panel, the Pages panel's menu, command search and the host API.
+    c("page.insert_blank_before", "Insert blank page before", None, None, Assembly, "file-plus"),
     c("page.rotate_dialog", "Rotate pages…", PAGES, None, Assembly, "rotate-cw"),
     c("page.duplicate", "Duplicate pages", PAGES, None, Assembly, "copy-plus"),
     c("page.reverse", "Reverse pages", PAGES, None, Assembly, "arrow-up-down"),

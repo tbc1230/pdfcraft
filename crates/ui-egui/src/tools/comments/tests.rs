@@ -66,6 +66,7 @@ fn an_upright_note_on_a_turned_page_is_in_view_where_it_is_drawn() {
         fill_sign: false,
         no_rotate,
         points: Vec::new(),
+        popup: None,
     };
     let page = PageInfo { width: 140.0, height: 200.0, label: String::new(), crop: [0.0, 0.0, 200.0, 140.0], rotation: 90 };
     let xf = PageXform { rect: Rect::from_min_size(Pos2::ZERO, vec2(140.0, 200.0)), rot: 0, pw: 140.0, ph: 200.0 };
@@ -111,6 +112,7 @@ fn listed(page: usize, index: usize, contents: &str, parent: Option<(usize, usiz
         fill_sign: false,
         no_rotate: false,
         points: Vec::new(),
+        popup: None,
     }
 }
 
@@ -200,6 +202,7 @@ fn annotation(subtype: &str, contents: Option<&str>, fill_sign: bool) -> Annotat
         fill_sign,
         no_rotate: false,
         points: Vec::new(),
+        popup: None,
     }
 }
 
@@ -405,6 +408,7 @@ fn the_context_menu_has_no_colour_entry() {
             fill_sign: false,
             points: Vec::new(),
             no_rotate: false,
+            popup: None,
         }],
         ..Default::default()
     };
@@ -608,5 +612,273 @@ fn delete_and_backspace_keep_an_item_that_is_not_deletable_and_do_nothing_withou
         let (edit, selected) = press_delete_key(key, false, true);
         assert!(edit.is_none(), "no annotate permission: {key:?} does nothing");
         assert_eq!(selected, Some((0, 0)));
+    }
+}
+
+// ── moving, resizing and reshaping on the page; note pop-ups ────────────────────────────────
+
+mod placed {
+    use super::*;
+    use crate::canvas::{DocView, ViewDefaults};
+    use crate::page_router::{CommentPart, Hit, Owner};
+    use pdfcraft_engine::DocId;
+
+    use super::super::geometry::{PopupPart, reshapable, resizable, slipped};
+
+    /// A 200 x 100 page (crop [0 0 200 100]) turned `rotation`, shown `rot` more by the view.
+    /// 1 screen pixel is 1 point, the page's top-left at the origin.
+    fn setup(rotation: u16, rot: u16, annotations: Vec<Annotation>) -> (DocInfo, PageXform) {
+        let (w, h) = if rotation % 180 == 90 { (100.0, 200.0) } else { (200.0, 100.0) };
+        let page = PageInfo { width: w, height: h, label: String::new(), crop: [0.0, 0.0, 200.0, 100.0], rotation };
+        let (sw, sh) = if rot % 180 == 90 { (h, w) } else { (w, h) };
+        let xf = PageXform { rect: Rect::from_min_size(Pos2::ZERO, vec2(sw, sh)), rot, pw: w, ph: h };
+        (DocInfo { pages: vec![page], annotations, ..Default::default() }, xf)
+    }
+
+    fn comment(subtype: &str, index: usize, rect: [f32; 4]) -> Annotation {
+        Annotation { subtype: subtype.into(), index, rect, ..listed(0, index, "text", None) }
+    }
+
+    fn cx<'a>(info: &'a DocInfo, xf: &'a PageXform, prefs: &'a CommentPrefs, ptr: &'a PagePointer, allowed: bool) -> PageCx<'a> {
+        PageCx { page: 0, xf, ptr, info, tool: QuickTool::Select, prefs, allowed, hidden: false, redact_mark: ([0.0; 3], 1.0) }
+    }
+
+    fn view(info: &DocInfo) -> DocView {
+        DocView::new(DocId(1), info, ViewDefaults::default())
+    }
+
+    /// The edit a gesture leaves when the pointer is released at `to` (screen).
+    fn dragged(cx: &PageCx<'_>, view: &mut DocView, gesture: Gesture, to: Pos2) -> Option<Edit> {
+        view.comments.gesture = Some(gesture);
+        view.pending_edit = None;
+        finish_select_gesture(false, cx, view, to);
+        view.pending_edit.take()
+    }
+
+    fn near(a: [f64; 4], b: [f64; 4]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.01)
+    }
+
+    fn inside(r: Rect, page: Rect) -> bool {
+        r.min.x >= page.min.x - 0.01 && r.min.y >= page.min.y - 0.01 && r.max.x <= page.max.x + 0.01 && r.max.y <= page.max.y + 0.01
+    }
+
+    #[test]
+    fn a_locked_comment_shows_no_handle() {
+        let mut square = comment("Square", 0, [10.0, 10.0, 50.0, 50.0]);
+        assert!(resizable(&square));
+        square.locked = true;
+        assert!(!resizable(&square), "no resize handle on a locked square");
+        let mut line = comment("Line", 1, [10.0, 10.0, 50.0, 50.0]);
+        line.points = vec![[10.0, 10.0], [50.0, 50.0]];
+        assert!(reshapable(&line));
+        line.locked = true;
+        assert!(!reshapable(&line), "no end handle on a locked line");
+    }
+
+    #[test]
+    fn the_slip_threshold_is_two_page_points_whatever_the_zoom() {
+        let o = pos2(10.0, 10.0);
+        assert!(!slipped(o, pos2(11.9, 10.0), 1.0));
+        assert!(slipped(o, pos2(12.0, 10.0), 1.0));
+        // At 4 pixels per point, 2 pt is 8 px.
+        assert!(!slipped(o, pos2(17.9, 10.0), 4.0));
+        assert!(slipped(o, pos2(18.0, 10.0), 4.0));
+        assert!(!slipped(o, pos2(100.0, 10.0), 0.0), "a page with no size on screen moves nothing");
+    }
+
+    #[test]
+    fn a_click_or_a_drag_below_the_slip_threshold_changes_nothing() {
+        let square = comment("Square", 0, [10.0, 10.0, 50.0, 50.0]);
+        let (info, xf) = setup(0, 0, vec![square]);
+        let (prefs, ptr) = (CommentPrefs::default(), PagePointer::default());
+        let c = cx(&info, &xf, &prefs, &ptr, true);
+        let mut v = view(&info);
+        let from = pos2(30.0, 70.0);
+        assert!(dragged(&c, &mut v, Gesture::Move { page: 0, index: 0, from }, from + vec2(1.5, 0.0)).is_none());
+        assert!(dragged(&c, &mut v, Gesture::Move { page: 0, index: 0, from }, from).is_none(), "a click");
+        // A handle dragged one point: not a resize.
+        let corner = pos2(50.0, 90.0);
+        let resize = Gesture::Resize { page: 0, index: 0, handle: (1, 1), from: corner, aspect_ratio: None };
+        assert!(dragged(&c, &mut v, resize.clone(), corner + vec2(1.0, 1.0)).is_none());
+        assert!(matches!(dragged(&c, &mut v, resize, corner + vec2(10.0, 10.0)), Some(Edit::ResizeAnnotation { .. })));
+        let mut line = comment("Line", 1, [10.0, 10.0, 50.0, 50.0]);
+        line.points = vec![[10.0, 10.0], [50.0, 50.0]];
+        let (info, xf) = setup(0, 0, vec![line]);
+        let c = cx(&info, &xf, &prefs, &ptr, true);
+        let end = c.to_screen([50.0, 50.0]);
+        let reshape = Gesture::Reshape { page: 0, index: 0, point: 1, points: vec![[10.0, 10.0], [50.0, 50.0]] };
+        assert!(dragged(&c, &mut v, reshape.clone(), end + vec2(1.0, 0.0)).is_none());
+        assert!(matches!(dragged(&c, &mut v, reshape, end + vec2(8.0, 0.0)), Some(Edit::ReshapeAnnotation { .. })));
+    }
+
+    /// Whatever the page's `/Rotate` and the view's rotation, a move, a resize and a reshape stop at
+    /// the page edge: the object ends where dropped, inside the page, with the dragged size.
+    #[test]
+    fn a_move_resize_or_reshape_stops_at_the_page_edge_on_every_rotation() {
+        for rotation in [0u16, 90, 180, 270] {
+            for rot in [0u16, 90, 180, 270] {
+                let square = comment("Square", 0, [80.0, 30.0, 120.0, 60.0]);
+                let (info, xf) = setup(rotation, rot, vec![square.clone()]);
+                let (prefs, ptr) = (CommentPrefs::default(), PagePointer::default());
+                let c = cx(&info, &xf, &prefs, &ptr, true);
+                let mut v = view(&info);
+                let at = c.screen_rect(&square);
+                let size = at.size();
+                // Dragged far beyond every side in turn.
+                for far in [vec2(1000.0, 0.0), vec2(-1000.0, 0.0), vec2(0.0, 1000.0), vec2(0.0, -1000.0), vec2(1000.0, 1000.0)] {
+                    let from = at.center();
+                    let Some(Edit::MoveAnnotation { dx, dy, .. }) = dragged(&c, &mut v, Gesture::Move { page: 0, index: 0, from }, from + far) else {
+                        panic!("a move is made (page {rotation}, view {rot})");
+                    };
+                    let moved = [80.0 + dx as f32, 30.0 + dy as f32, 120.0 + dx as f32, 60.0 + dy as f32];
+                    let r = xf.user_rect(&info, 0, moved);
+                    assert!(inside(r, xf.rect), "{r:?} is inside {:?} (page {rotation}, view {rot}, drag {far:?})", xf.rect);
+                    assert!((r.width() - size.x).abs() < 0.01 && (r.height() - size.y).abs() < 0.01, "the size is kept");
+                    if far.x > 0.0 && far.y == 0.0 {
+                        assert!((r.max.x - xf.rect.max.x).abs() < 0.01, "stops at the right edge");
+                    }
+                    if far.x < 0.0 {
+                        assert!((r.min.x - xf.rect.min.x).abs() < 0.01, "stops at the left edge");
+                    }
+                }
+                // Resized from the lower right corner far outside.
+                let corner = at.right_bottom();
+                let resize = Gesture::Resize { page: 0, index: 0, handle: (1, 1), from: corner, aspect_ratio: None };
+                let Some(Edit::ResizeAnnotation { rect, .. }) = dragged(&c, &mut v, resize, corner + vec2(1000.0, 1000.0)) else {
+                    panic!("a resize is made (page {rotation}, view {rot})");
+                };
+                let r = xf.user_rect(&info, 0, rect.map(|x| x as f32));
+                assert!(inside(r, xf.rect), "resized {r:?} inside {:?} (page {rotation}, view {rot})", xf.rect);
+                assert!((r.min - at.min).length() < 0.01, "the opposite corner stays");
+            }
+        }
+        // A line's end dragged off the page stops on its edge.
+        let mut line = comment("Line", 0, [20.0, 20.0, 60.0, 60.0]);
+        line.points = vec![[20.0, 20.0], [60.0, 60.0]];
+        let (info, xf) = setup(0, 0, vec![line]);
+        let (prefs, ptr) = (CommentPrefs::default(), PagePointer::default());
+        let c = cx(&info, &xf, &prefs, &ptr, true);
+        let mut v = view(&info);
+        let reshape = Gesture::Reshape { page: 0, index: 0, point: 1, points: vec![[20.0, 20.0], [60.0, 60.0]] };
+        let Some(Edit::ReshapeAnnotation { points, .. }) = dragged(&c, &mut v, reshape, pos2(5000.0, -5000.0)) else { panic!("a reshape is made") };
+        assert!((points[1][0] - 200.0).abs() < 0.01 && (points[1][1] - 100.0).abs() < 0.01, "the end stops at the page's corner: {points:?}");
+    }
+
+    #[test]
+    fn dragging_a_group_to_the_edge_keeps_its_arrangement() {
+        let (info, xf) = setup(0, 0, vec![comment("Square", 0, [10.0, 10.0, 30.0, 30.0]), comment("Circle", 1, [150.0, 10.0, 190.0, 30.0])]);
+        let (prefs, ptr) = (CommentPrefs::default(), PagePointer::default());
+        let c = cx(&info, &xf, &prefs, &ptr, true);
+        let mut v = view(&info);
+        v.comments.also.push((0, 1));
+        let from = pos2(20.0, 80.0);
+        let Some(Edit::Batch { edits, .. }) = dragged(&c, &mut v, Gesture::Move { page: 0, index: 0, from }, from + vec2(500.0, 0.0)) else {
+            panic!("a batch");
+        };
+        // The right-most one reaches the edge (10 more points) and the other goes the same way.
+        let dxs: Vec<f64> = edits.iter().map(|e| if let Edit::MoveAnnotation { dx, .. } = e { *dx } else { f64::NAN }).collect();
+        assert!(dxs.iter().all(|d| (d - 10.0).abs() < 0.01), "{dxs:?}");
+    }
+
+    fn note(popup: Option<([f32; 4], bool)>) -> Annotation {
+        Annotation { popup, author: Some("Ada".into()), contents: Some("Hello".into()), ..comment("Text", 0, [20.0, 60.0, 40.0, 80.0]) }
+    }
+
+    #[test]
+    fn the_pop_up_parts_round_trip_through_the_routers_parts() {
+        for part in [PopupPart::Close, PopupPart::Text, PopupPart::Bar, PopupPart::Edge(1, 1), PopupPart::Edge(-1, 0), PopupPart::Edge(0, 1)] {
+            assert_eq!(PopupPart::of(part.part()), Some(part));
+        }
+        assert_eq!(PopupPart::of(CommentPart::Body), None);
+    }
+
+    #[test]
+    fn an_open_pop_up_is_hit_by_part_and_only_a_closed_note_is_its_icon() {
+        // The pop-up: page x 60..160, y 20..80, which is screen y 20..80 on this 100 high page.
+        let open = note(Some(([60.0, 20.0, 160.0, 80.0], true)));
+        let (info, xf) = setup(0, 0, vec![open]);
+        let (prefs, ptr) = (CommentPrefs::default(), PagePointer::default());
+        let v = view(&info);
+        let owner = |allowed: bool, p: Pos2| {
+            let c = cx(&info, &xf, &prefs, &ptr, allowed);
+            hit(&c, &v, p, false).map(|h: Hit| h.owner)
+        };
+        let part = |part| Some(Owner::Comment { index: 0, part });
+        assert_eq!(owner(true, pos2(100.0, 30.0)), part(CommentPart::PopupBar), "the title bar");
+        assert_eq!(owner(true, pos2(100.0, 60.0)), part(CommentPart::PopupText), "the text");
+        assert_eq!(owner(true, pos2(150.0, 31.0)), part(CommentPart::PopupClose), "the close control");
+        assert_eq!(owner(true, pos2(160.0, 50.0)), part(CommentPart::PopupEdge(1, 0)), "the right edge");
+        assert_eq!(owner(true, pos2(160.0, 80.0)), part(CommentPart::PopupEdge(1, 1)), "the corner");
+        // Not permitted: only the text, no grip.
+        assert_eq!(owner(false, pos2(100.0, 30.0)), part(CommentPart::PopupText));
+        assert_eq!(owner(false, pos2(165.0, 85.0)), None);
+        // The icon: page x 20..40, y 60..80 is screen y 20..40.
+        assert_eq!(owner(true, pos2(30.0, 30.0)), part(CommentPart::Body));
+        // A locked note's pop-up is only readable.
+        let mut locked = note(Some(([60.0, 20.0, 160.0, 80.0], true)));
+        locked.locked = true;
+        let (info, xf) = setup(0, 0, vec![locked]);
+        let c = cx(&info, &xf, &prefs, &ptr, true);
+        assert_eq!(hit(&c, &v, pos2(100.0, 30.0), false).map(|h| h.owner), part(CommentPart::PopupText));
+    }
+
+    #[test]
+    fn the_pop_up_moves_by_its_title_bar_and_resizes_by_its_edges_within_the_page() {
+        let (info, xf) = setup(0, 0, vec![note(Some(([60.0, 20.0, 160.0, 80.0], true)))]);
+        let (prefs, ptr) = (CommentPrefs::default(), PagePointer::default());
+        let c = cx(&info, &xf, &prefs, &ptr, true);
+        let mut v = view(&info);
+        let bar = pos2(100.0, 30.0);
+        let Some(Edit::SetNotePopup { open: true, rect: Some(r), .. }) =
+            dragged(&c, &mut v, Gesture::PopupMove { page: 0, index: 0, from: bar }, bar + vec2(1000.0, 1000.0))
+        else {
+            panic!("the pop-up is moved")
+        };
+        // Pushed to the right and down it ends in the page's lower right corner (page y 0..60).
+        assert!(near(r, [100.0, 0.0, 200.0, 60.0]), "{r:?}");
+        assert!(dragged(&c, &mut v, Gesture::PopupMove { page: 0, index: 0, from: bar }, bar + vec2(1.0, 0.0)).is_none(), "below the slip threshold");
+        let corner = pos2(160.0, 80.0);
+        let Some(Edit::SetNotePopup { rect: Some(r), .. }) =
+            dragged(&c, &mut v, Gesture::PopupResize { page: 0, index: 0, handle: (1, 1), from: corner }, corner + vec2(1000.0, 1000.0))
+        else {
+            panic!("the pop-up is resized")
+        };
+        assert!(near(r, [60.0, 0.0, 200.0, 80.0]), "the corner stops at the page edge: {r:?}");
+        // Shrunk to nothing it keeps its least size.
+        let Some(Edit::SetNotePopup { rect: Some(r), .. }) =
+            dragged(&c, &mut v, Gesture::PopupResize { page: 0, index: 0, handle: (1, 1), from: corner }, pos2(65.0, 25.0))
+        else {
+            panic!("the pop-up is resized")
+        };
+        assert!(near([r[2] - r[0], r[3] - r[1], 0.0, 0.0], [40.0, 40.0, 0.0, 0.0]), "{r:?}");
+    }
+
+    #[test]
+    fn opening_puts_the_pop_up_inside_the_page_and_closing_writes_only_the_state() {
+        // Its default place (right of the icon) lies off the page's right edge.
+        let closed = note(Some(([180.0, 20.0, 380.0, 80.0], false)));
+        let (info, xf) = setup(0, 0, vec![closed.clone()]);
+        let (prefs, ptr) = (CommentPrefs::default(), PagePointer::default());
+        let c = cx(&info, &xf, &prefs, &ptr, true);
+        let Edit::Batch { edits, label } = popup_edit(&c, &closed, true) else { panic!("one named step") };
+        assert_eq!(label, "Open note");
+        let [Edit::SetNotePopup { open: true, rect: Some(r), .. }] = &edits[..] else { panic!("{edits:?}") };
+        assert!(r[0] >= 0.0 && r[2] <= 200.0 && r[1] >= 0.0 && r[3] <= 100.0, "{r:?} is inside the page");
+        assert!(near([r[2] - r[0], r[3] - r[1], 0.0, 0.0], [200.0, 60.0, 0.0, 0.0]), "its size is kept: {r:?}");
+        assert!(matches!(popup_edit(&c, &closed, false), Edit::SetNotePopup { page: 0, index: 0, open: false, rect: None }));
+    }
+
+    #[test]
+    fn text_markup_is_not_moved_or_resized() {
+        let mut highlight = comment("Highlight", 0, [10.0, 10.0, 90.0, 24.0]);
+        highlight.quads = vec![[10.0, 24.0, 90.0, 24.0, 10.0, 10.0, 90.0, 10.0]];
+        assert!(!resizable(&highlight));
+        let (info, xf) = setup(0, 0, vec![highlight]);
+        let (prefs, ptr) = (CommentPrefs::default(), PagePointer::default());
+        let v = view(&info);
+        let c = cx(&info, &xf, &prefs, &ptr, true);
+        let h = hit(&c, &v, pos2(50.0, 83.0), false).expect("the highlight is under the pointer");
+        assert!(h.declines_drag, "a drag across a highlight selects text; it is not moved");
     }
 }

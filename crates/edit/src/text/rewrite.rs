@@ -1,3 +1,4 @@
+use super::arabic;
 use super::blocks::{BlockStyle, TextBlock, paragraph_separator, wrap};
 use super::fallback::{
     Encoder, MAX_TYPE3_GLYPHS, Type3Fallback, drop_unused_fallback_fonts, needs_type3, no_japanese_font, source_encodes, source_family,
@@ -209,6 +210,53 @@ pub(crate) fn rewrite_block_with_limit(
     TextSession::open(doc, page, block)?.commit_with_limit(doc, text, style, max_glyphs)
 }
 
+/// The breaks between a paragraph's rows that the corrected `draft` takes back out, by break
+/// index. A break that is only a wrap is taken out where the row before it was corrected and
+/// would no longer fit the paragraph's `width`, or leaves room for the first word of the next row;
+/// the rows after it then wrap again, up to the next typed break. Row widths are estimated from
+/// the width the row had. A draft with a break added or taken out has none: its breaks are typed.
+fn wanted_joins(block: &TextBlock, lines: &[TextLine], draft: &str, width: f64) -> Vec<bool> {
+    let none = Vec::new();
+    let Some(soft) = block.soft_breaks() else { return none };
+    let old: Vec<&str> = block.editor_text.split('\n').collect();
+    let new: Vec<&str> = draft.split('\n').collect();
+    if new.len() != old.len() || draft == block.editor_text || !width.is_finite() {
+        return none;
+    }
+    // The width of each row per character, as it was drawn.
+    let per_char = |row: usize| -> f64 {
+        let rects: Vec<[f64; 4]> = block.rows.get(row).into_iter().flatten().filter_map(|i| lines.get(*i)).map(|l| l.rect).collect();
+        let left = rects.iter().map(|r| r[0]).fold(f64::INFINITY, f64::min);
+        let right = rects.iter().map(|r| r[2]).fold(f64::NEG_INFINITY, f64::max);
+        let chars = old.get(row).map_or(0, |r| r.chars().count());
+        if chars == 0 || !(right - left).is_finite() { 0.0 } else { (right - left) / chars as f64 }
+    };
+    let mut join = vec![false; soft.len()];
+    let mut chain = false;
+    for (i, is_soft) in soft.iter().copied().enumerate() {
+        if !is_soft {
+            chain = false;
+            continue;
+        }
+        if chain {
+            join[i] = true;
+            continue;
+        }
+        let (Some(was), Some(now), Some(next)) = (old.get(i), new.get(i), new.get(i + 1)) else { continue };
+        if was == now {
+            continue;
+        }
+        let estimated = per_char(i) * now.chars().count() as f64;
+        let first_word = next.split_whitespace().next().map_or(0, |w| w.chars().count().saturating_add(1));
+        let next_word = per_char(i + 1) * first_word as f64;
+        if estimated > width + 0.5 || width - estimated >= next_word {
+            join[i] = true;
+            chain = true;
+        }
+    }
+    join
+}
+
 struct RewriteDispatch {
     upright: bool,
     use_styled_path: bool,
@@ -338,6 +386,8 @@ struct Advance<'a> {
     /// The source font, when its glyphs are reused.
     source: Option<&'a Metrics>,
     type3: Option<&'a Type3Fallback>,
+    /// The editor's Arabic face, when the paragraph is set in it ([`arabic`]).
+    arabic: Option<&'a arabic::ArabicFace>,
     family: crate::added::Family,
     bold: bool,
     italic: bool,
@@ -352,6 +402,9 @@ struct Advance<'a> {
 impl Advance<'_> {
     fn of(&self, s: &str) -> f64 {
         let extra = s.chars().count() as f64 * self.char_spacing;
+        if let Some(face) = self.arabic {
+            return (face.width_em(s) * self.size + extra) * self.scale * self.k;
+        }
         let t = match (self.source, self.type3) {
             (Some(m), _) => {
                 let visual_s = if m.visual_order { crate::indic::to_visual(s) } else { s.to_owned() };
@@ -373,11 +426,11 @@ impl Advance<'_> {
 }
 
 /// The font a rewritten paragraph is shown in, and how its text is encoded.
-struct FontChoice {
-    show_font: String,
-    encode: Encoder,
+pub(super) struct FontChoice {
+    pub(super) show_font: String,
+    pub(super) encode: Encoder,
     /// The stand-in face to tell the caller about.
-    substituted: Option<String>,
+    pub(super) substituted: Option<String>,
 }
 
 /// What [`choose_font`] needs to know about the paragraph.
@@ -531,6 +584,8 @@ struct LineWriter<'a> {
     alignment: Alignment,
     encode: &'a Encoder,
     source: Option<&'a Metrics>,
+    /// The editor's Arabic face, when the paragraph is set in it: it shows each line itself.
+    arabic: Option<&'a arabic::ArabicFace>,
     /// The paragraph's alignment, and the rows aligned on their own ([`BlockStyle::aligns`]).
     align: Option<crate::added::Align>,
     aligns: &'a [Option<crate::added::Align>],
@@ -546,10 +601,10 @@ struct LineWriter<'a> {
 }
 
 /// What carries over from one line to the next.
-struct LineCursor {
+pub(super) struct LineCursor {
     x: f64,
     tw_set: f64,
-    shown_font: String,
+    pub(super) shown_font: String,
 }
 
 impl LineWriter<'_> {
@@ -633,14 +688,19 @@ impl LineWriter<'_> {
             ops.push(Op::new("Tw", vec![n(tw)]));
             cursor.tw_set = tw;
         }
-        // Each wrapped line in typing order; drawn left to right (right-to-left runs reversed).
-        let visual = crate::bidi::to_visual(shown);
-        // Stretched without word spacing: shown up to and including each space, then moved on.
-        let pieces: Vec<&str> = if stretch > 0.0 { visual.split_inclusive(' ').collect() } else { vec![visual.as_str()] };
-        for piece in pieces {
-            self.show_piece(piece, line, tw, cursor, ops)?;
-            if stretch > 0.0 && piece.ends_with(' ') {
-                ops.push(Op::new("TJ", vec![Object::Array(vec![n(-1000.0 * stretch / self.size)])]));
+        if let Some(face) = self.arabic {
+            // Shaped and laid out in drawing order by the face, from the line as typed.
+            face.show_line(shown, self.size, cursor, ops)?;
+        } else {
+            // Each wrapped line in typing order; drawn left to right (right-to-left runs reversed).
+            let visual = crate::bidi::to_visual(shown);
+            // Stretched without word spacing: shown up to and including each space, then moved on.
+            let pieces: Vec<&str> = if stretch > 0.0 { visual.split_inclusive(' ').collect() } else { vec![visual.as_str()] };
+            for piece in pieces {
+                self.show_piece(piece, line, tw, cursor, ops)?;
+                if stretch > 0.0 && piece.ends_with(' ') {
+                    ops.push(Op::new("TJ", vec![Object::Array(vec![n(-1000.0 * stretch / self.size)])]));
+                }
             }
         }
         let tw = tw + stretch;
@@ -810,6 +870,17 @@ pub(crate) fn rewrite_block_from(
         }
         None => style,
     };
+    // A corrected word changes where a wrapped paragraph breaks: the breaks that were only wraps
+    // are not kept as typed line breaks where the correction needs them gone, so longer text
+    // gives more lines and shorter fewer. A paragraph given a width is laid out as typed.
+    let reflowed = match text {
+        Some(draft) if style.width.is_none() => {
+            let join = wanted_joins(&b, &lines, draft, b.rect[2] - b.rect[0]);
+            join.contains(&true).then(|| b.joined_draft(draft, &join))
+        }
+        _ => None,
+    };
+    let text = reflowed.as_deref().or(text);
     let members: Vec<&TextLine> = b.lines.iter().map(|i| &lines[*i]).collect();
     // One clipping run is enough: rewriting the paragraph would drop its mask with the rest.
     let mut dropped = coincident_ops(&lines, &members);
@@ -829,8 +900,40 @@ pub(crate) fn rewrite_block_from(
     if dispatch.use_styled_path && style.align == Some(crate::added::Align::Justify) {
         return Err(EditError::Invalid("justification of mixed-style existing paragraphs is not supported".into()));
     }
+    // A corrected paragraph that reads right to left: the styled layout aligns left unless told,
+    // so the paragraph keeps its right edge by being aligned right, as the single-style path does.
+    let corrected = text.is_some_and(|draft| draft != b.editor_text && draft != b.text);
+    let mut arabic_mode = false;
     if dispatch.use_styled_path {
-        return rewrite_styled_block(doc, page, &b, &lines, text, style, max_glyphs);
+        let draft = text.unwrap_or(&b.editor_text);
+        let right_aligned;
+        let styled = if corrected && style.align.is_none() && crate::bidi::rtl_base(draft) {
+            right_aligned = BlockStyle { align: Some(crate::added::Align::Right), ..style.clone() };
+            &right_aligned
+        } else {
+            style
+        };
+        // Arabic the paragraph's own font cannot draw (no joining tables in a subset, or a letter
+        // it lacks) is set in the editor's Arabic face instead. A single line keeps its right edge
+        // as it grows, which only that path does, so it takes that path at once.
+        let arabic_candidate = corrected
+            && dispatch.upright
+            && style.ranges.is_empty()
+            && style.resource.is_none()
+            && style.family.is_none()
+            && pdfcraft_fonts::document_arabic_font().is_some()
+            && draft.chars().any(arabic::is_arabic);
+        if !arabic_candidate {
+            return rewrite_styled_block(doc, page, &b, &lines, text, styled, max_glyphs);
+        }
+        if b.rows.len() > 1 {
+            let mut trial = doc.clone();
+            if let Ok(edit) = rewrite_styled_block(&mut trial, page, &b, &lines, text, styled, max_glyphs) {
+                *doc = trial;
+                return Ok(edit);
+            }
+        }
+        arabic_mode = true;
     }
     let upright = dispatch.upright;
     let streams = content_streams(doc, &p.dict)?;
@@ -844,7 +947,7 @@ pub(crate) fn rewrite_block_from(
     let emit = &last.origin;
     let (font_name, ParaStyle { state: o_state, size, old_size, k }) = paragraph_style(o, style)?;
     let source = source_font(doc, &fonts_res, &font_name, first, &flat, style);
-    let reuse = source.reuse;
+    let reuse = source.reuse && !arabic_mode;
     // The chosen style also determines the real Japanese fallback outlines and advances.
     let (family, bold, italic) = style.family.unwrap_or((source_family(&b.base_font), b.bold, b.italic));
     let bold = style.bold.unwrap_or(bold);
@@ -874,11 +977,14 @@ pub(crate) fn rewrite_block_from(
     let right_edge = if anchored_right { (b.rect[2] - b.rect[0]).max(0.0) } else { width };
     let movement = drawn_movement(emit.ctm, dx, dy)?;
     let tm = emit_text_matrix(o, emit)?;
-    let type3 = if !reuse && needs_type3(&flat) { Some(type3_font(doc, &mut fonts_res, &flat, family, bold, max_glyphs)?) } else { None };
+    let arabic = arabic_mode.then(|| arabic::ArabicFace::new(family, bold, italic));
+    let type3 =
+        if !reuse && !arabic_mode && needs_type3(&flat) { Some(type3_font(doc, &mut fonts_res, &flat, family, bold, max_glyphs)?) } else { None };
     let source_metrics = source.metrics.as_ref().filter(|_| reuse);
     let advance = Advance {
         source: source_metrics,
         type3: type3.as_ref(),
+        arabic: arabic.as_ref(),
         family,
         bold,
         italic,
@@ -896,20 +1002,23 @@ pub(crate) fn rewrite_block_from(
     };
     let right_edge = if anchored_right { right_edge } else { width };
     let wrapped = wrap(&text, width + 0.5, |s| advance.of(s));
-    let font = choose_font(
-        &FontInputs {
-            source: source_metrics,
-            type3: type3.as_ref(),
-            font_name: &font_name,
-            flat: &flat,
-            source_base_font: &b.base_font,
-            family,
-            bold,
-            italic,
-            family_requested: style.family.is_some(),
-        },
-        &mut fonts_res,
-    )?;
+    let font = match arabic.as_ref() {
+        Some(face) => face.register(doc, &mut fonts_res, &wrapped)?,
+        None => choose_font(
+            &FontInputs {
+                source: source_metrics,
+                type3: type3.as_ref(),
+                font_name: &font_name,
+                flat: &flat,
+                source_base_font: &b.base_font,
+                family,
+                bold,
+                italic,
+                family_requested: style.family.is_some(),
+            },
+            &mut fonts_res,
+        )?,
+    };
     let lead = line_lead(&b, &lines, style, &LeadScale { k, size, old_size, leading: o_state.leading });
     let start = last.ops.first().copied().unwrap_or(emit.bt_op);
     let split = shows_before_paragraph(&ops, emit.bt_op, start, &dropped);
@@ -919,13 +1028,14 @@ pub(crate) fn rewrite_block_from(
     // Word spacing reaches only single-byte code 32 (ISO 32000-1 §9.3.3); see `write_line`.
     let word_spacing_reaches_spaces = match source_metrics {
         Some(m) => m.encode(" ").is_some_and(|b| m.codes(&b).iter().all(|(c, len)| m.is_space(*c, *len))),
-        None => type3.is_none(),
+        None => type3.is_none() && arabic.is_none(),
     };
     let writer = LineWriter {
         advance: &advance,
         alignment: Alignment { width, k, anchored_right, right_edge, rtl },
         encode: &font.encode,
         source: source_metrics,
+        arabic: arabic.as_ref(),
         align,
         aligns: &style.aligns,
         word_spacing_reaches_spaces,

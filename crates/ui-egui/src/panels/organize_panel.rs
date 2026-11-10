@@ -122,7 +122,8 @@ pub(crate) fn panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
             });
             ui.add_space(2.0);
             // Insert ▸: a blank page, pages from a file, or copies of the selected pages.
-            let insert = if offered("page.insert_blank") || offered("page.insert") || offered("page.duplicate") {
+            let insert = if offered("page.insert_blank") || offered("page.insert_blank_before") || offered("page.insert") || offered("page.duplicate")
+            {
                 Some(row(ui, t, "file-plus-2", tl!("Insert"), Availability::Ready, true))
             } else {
                 None
@@ -133,6 +134,14 @@ pub(crate) fn panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
                         let crop = info.pages.get(last).map_or([0.0, 0.0, 612.0, 792.0], |p| p.crop);
                         let (w, h) = ((crop[2] - crop[0]).abs().max(1.0) as f64, (crop[3] - crop[1]).abs().max(1.0) as f64);
                         act = Some(Act::Edit(Box::new(Edit::InsertBlankPage { at: last.saturating_add(1), width: w, height: h })));
+                    }
+                    if offered("page.insert_blank_before") && ui.button(tl!("Insert a blank page before the selection")).clicked() {
+                        // The first selected page, or the current one: the new page has its size and
+                        // takes its place; the page and its markup move one place later.
+                        let first = targets.iter().min().copied().unwrap_or(0);
+                        let crop = info.pages.get(first).map_or([0.0, 0.0, 612.0, 792.0], |p| p.crop);
+                        let (w, h) = ((crop[2] - crop[0]).abs().max(1.0) as f64, (crop[3] - crop[1]).abs().max(1.0) as f64);
+                        act = Some(Act::Edit(Box::new(Edit::InsertBlankPage { at: first, width: w, height: h })));
                     }
                     if offered("page.insert") && ui.button(tl!("Insert pages from a file…")).clicked() {
                         act = Some(Act::View(ViewAction::InsertFromFile));

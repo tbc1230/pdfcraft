@@ -10854,3 +10854,249 @@ fn review_inside_scope_group_move_matches_direct_transform_under_outer_scale() {
         }
     }
 }
+
+// Correcting wording in a paragraph (fork/sources/modifications.md, "Correct wording in a paragraph").
+
+const COURIER: &str = "<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>";
+
+/// A subset-style font set in Courier's width (600) with codes 32 to `last` drawn: with `last` 126
+/// it has no accented letter, with 255 it has them.
+fn mono_subset(last: u32) -> String {
+    let widths = vec!["600"; (last - 31) as usize].join(" ");
+    format!(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /ABCDEF+MonoSubset /FirstChar 32 /LastChar {last} /Widths [{widths}] /Encoding /WinAnsiEncoding >>"
+    )
+}
+
+/// One page with font `/F1` (object 5) and `content`.
+fn paragraph_page(font: &str, content: &str) -> Document {
+    build(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        &stream("", content),
+        font,
+    ])
+}
+
+/// Two paragraphs in a font 7.2 pt wide per character at 12 pt. The first is four rows of 40, 41,
+/// 41 and 27 characters (each row is as wide as the measure within a character, so the breaks
+/// between them are wraps), in blue; the second is two short rows, in black, far below.
+const TWO_PARAGRAPHS: &str = "BT /F1 12 Tf 14.4 TL 0.1 0.2 0.6 rg 1 0 0 1 72 700 Tm \
+    (Please review the attached agreement and) Tj T* (confirm that the payment terms are right.) Tj T* \
+    (Send your comments to the project lead by) Tj T* (Friday so that we can sign.) Tj ET \
+    BT /F1 12 Tf 14.4 TL 0 g 1 0 0 1 72 500 Tm (Deliveries take three to five days.) Tj T* (Express orders ship the next day.) Tj ET";
+
+fn paragraph_fonts() -> [String; 2] {
+    [COURIER.to_string(), mono_subset(126)]
+}
+
+/// The text of the page's paragraphs, in reading order, a row break read as a space: what Find
+/// searches. A word drawn in more than one font (an accent in a stand-in font) is still one word.
+fn page_text(doc: &Document) -> String {
+    text::text_blocks(doc, 0).unwrap().iter().map(|b| b.editor_text.replace('\n', " ")).collect::<Vec<_>>().join(" ")
+}
+
+/// The resource names of the page's fonts, sorted.
+fn page_font_names(doc: &Document) -> Vec<String> {
+    let page = &pdfcraft_model::pages(doc)[0];
+    let res = doc.resolve(page.dict.get(b"Resources").unwrap()).as_dict().unwrap().clone();
+    let fonts = doc.resolve(res.get(b"Font").unwrap()).as_dict().unwrap().clone();
+    let mut names: Vec<String> = fonts.iter().map(|(k, _)| String::from_utf8_lossy(k).into_owned()).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_corrected_word_shows_and_the_replaced_word_is_gone_from_the_page_text() {
+    for font in paragraph_fonts() {
+        let mut doc = paragraph_page(&font, TWO_PARAGRAPHS);
+        let before = text::text_blocks(&doc, 0).unwrap();
+        assert_eq!(before.len(), 2, "{:?}", before.iter().map(|b| b.text.as_str()).collect::<Vec<_>>());
+        assert_eq!(before[0].rows.len(), 4);
+        let draft = before[0].editor_text.replace("agreement", "contract");
+        assert_ne!(draft, before[0].editor_text);
+        text::replace_block(&mut doc, 0, 0, &draft).unwrap();
+        let doc = reopen(&doc);
+        let all = page_text(&doc);
+        assert!(all.contains("contract") && !all.contains("agreement"), "{all}");
+        // Not only gone from the text layer: no operator of the page still draws it.
+        let content = String::from_utf8_lossy(&page_content_bytes(&doc, 0)).into_owned();
+        assert!(!content.contains("agreement"), "{content}");
+    }
+}
+
+#[test]
+fn a_correction_rewraps_the_paragraph_within_its_width_and_leaves_the_next_one_alone() {
+    for font in paragraph_fonts() {
+        let doc = paragraph_page(&font, TWO_PARAGRAPHS);
+        let before = text::text_blocks(&doc, 0).unwrap();
+        let [left, _, right, _] = before[0].rect;
+        let rows: Vec<&str> = before[0].editor_text.split('\n').collect();
+        assert_eq!(rows.len(), 4);
+        let after_edit = |draft: &str| {
+            let mut doc = doc.clone();
+            text::replace_block(&mut doc, 0, 0, draft).unwrap();
+            reopen(&doc)
+        };
+        // Longer: the rows are filled again, so there are more of them, none wider than before.
+        let longer = after_edit(&before[0].editor_text.replace("agreement", "service agreement and all of its annexes"));
+        let blocks = text::text_blocks(&longer, 0).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].rows.len() > 4, "{} rows: {:?}", blocks[0].rows.len(), blocks[0].editor_text);
+        let lines = text::text_lines(&longer, 0).unwrap();
+        for index in &blocks[0].lines {
+            let r = lines[*index].rect;
+            assert!(r[0] >= left - 0.5 && r[2] <= right + 0.5, "{r:?} outside {left}..{right}");
+        }
+        // The next paragraph is as it was, and the corrected one keeps its edge, size, colour and spacing.
+        let (next, was) = (&blocks[1], &before[1]);
+        assert_eq!(
+            (&next.text, next.rect, next.size, next.color, &next.base_font, next.rows.len()),
+            (&was.text, was.rect, was.size, was.color, &was.base_font, was.rows.len())
+        );
+        assert!((blocks[0].rect[0] - left).abs() < 0.01 && (blocks[0].size - before[0].size).abs() < 1e-9);
+        for (got, want) in blocks[0].color.iter().zip(before[0].color) {
+            assert!((got - want).abs() < 1e-6, "{:?}", blocks[0].color);
+        }
+        let mut bottoms: Vec<f64> = blocks[0].lines.iter().map(|i| lines[*i].rect[1]).collect();
+        bottoms.sort_by(|a, b| b.total_cmp(a));
+        for pair in bottoms.windows(2) {
+            assert!((pair[0] - pair[1] - 14.4).abs() < 0.05, "{bottoms:?}");
+        }
+        // Shorter, with every row break kept in the draft: fewer rows, because the breaks that
+        // were only wraps are not kept.
+        let draft = [rows[0], "confirm the terms.", "Send comments by", "Friday."].join("\n");
+        let shorter = after_edit(&draft);
+        let blocks = text::text_blocks(&shorter, 0).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].rows.len() < 4, "{} rows: {:?}", blocks[0].rows.len(), blocks[0].editor_text);
+        assert_eq!(blocks[1].text, before[1].text);
+    }
+}
+
+#[test]
+fn a_break_that_was_typed_stays_a_break_when_a_word_is_corrected() {
+    // Rows that stop short of the measure (the longest row comes last) are line breaks, not wraps.
+    let content = "BT /F1 12 Tf 14.4 TL 1 0 0 1 72 700 Tm (Dear reader,) Tj T* (We moved.) Tj T* (Regards and best wishes,) Tj ET";
+    let mut doc = paragraph_page(COURIER, content);
+    let block = text::text_blocks(&doc, 0).unwrap().remove(0);
+    assert_eq!(block.reflow_text.matches('\n').count(), 2, "{:?}", block.reflow_text);
+    text::replace_block(&mut doc, 0, 0, &block.editor_text.replace("moved", "relocated")).unwrap();
+    let after = text::text_blocks(&doc, 0).unwrap().remove(0);
+    assert_eq!(after.editor_text, "Dear reader,\nWe relocated.\nRegards and best wishes,");
+}
+
+#[test]
+fn a_letter_the_paragraph_font_cannot_draw_is_drawn_as_typed_in_an_editor_font() {
+    let rows = "BT /F1 12 Tf 14.4 TL 1 0 0 1 72 700 Tm (Veuillez relire le contrat ci-joint) Tj T* (puis confirmer les conditions de) Tj T* (paiement avant vendredi.) Tj ET";
+    // The font has no accented letter: the paragraph is set in a standard font, which has them.
+    let mut doc = paragraph_page(&mono_subset(126), rows);
+    let before = text::text_blocks(&doc, 0).unwrap().remove(0);
+    let edit = text::replace_block(&mut doc, 0, 0, &before.editor_text.replace("contrat", "règlement précédent")).unwrap();
+    assert!(edit.substituted.is_some(), "{edit:?}");
+    let doc = reopen(&doc);
+    let all = page_text(&doc);
+    assert!(all.contains("règlement précédent") && !all.contains("contrat"), "{all}");
+    assert!(!all.contains('?') && !all.contains('\u{fffd}'), "no placeholder: {all}");
+    assert!(page_font_names(&doc).iter().any(|n| n.starts_with("PCEd")), "{:?}", page_font_names(&doc));
+    // A font that already draws the letters is kept: no other font is added.
+    for font in [mono_subset(255), COURIER.to_string()] {
+        let mut doc = paragraph_page(&font, rows);
+        let names = page_font_names(&doc);
+        let edit = text::replace_block(&mut doc, 0, 0, &before.editor_text.replace("contrat", "règlement précédent")).unwrap();
+        assert_eq!(edit.substituted, None);
+        let doc = reopen(&doc);
+        assert!(page_text(&doc).contains("règlement précédent"));
+        assert_eq!(page_font_names(&doc), names);
+    }
+}
+
+#[test]
+fn a_character_no_font_can_draw_is_refused_and_the_paragraph_is_unchanged() {
+    for font in paragraph_fonts() {
+        let mut doc = paragraph_page(&font, TWO_PARAGRAPHS);
+        let blocks = text::text_blocks(&doc, 0).unwrap();
+        let content = page_content_bytes(&doc, 0);
+        let error = text::replace_block(&mut doc, 0, 0, &blocks[0].editor_text.replace("agreement", "agree\u{1f4a9}ment")).unwrap_err();
+        assert!(!error.to_string().is_empty());
+        assert_eq!(page_content_bytes(&doc, 0), content, "the paragraph is as it was");
+        assert_eq!(text::text_blocks(&doc, 0).unwrap(), blocks);
+    }
+}
+
+/// What each code of the Type 3 font `name` on page 1 stands for, from its `/ToUnicode`.
+fn type3_codes(doc: &Document, name: &str) -> std::collections::HashMap<u8, String> {
+    let page = &pdfcraft_model::pages(doc)[0];
+    let res = doc.resolve(page.dict.get(b"Resources").unwrap()).as_dict().unwrap().clone();
+    let fonts = doc.resolve(res.get(b"Font").unwrap()).as_dict().unwrap().clone();
+    let font = doc.resolve(fonts.get(name.as_bytes()).unwrap()).as_dict().unwrap().clone();
+    let cmap = String::from_utf8_lossy(&stream_bytes(doc, font.get(b"ToUnicode").unwrap()).unwrap()).into_owned();
+    let mut codes = std::collections::HashMap::new();
+    for line in cmap.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let [code, text] = parts.as_slice()
+            && code.len() == 4
+            && code.starts_with('<')
+            && text.starts_with('<')
+        {
+            let units: Vec<u16> =
+                text.as_bytes()[1..text.len() - 1].chunks(4).map(|c| u16::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap()).collect();
+            codes.insert(u8::from_str_radix(&code[1..3], 16).unwrap(), String::from_utf16_lossy(&units));
+        }
+    }
+    codes
+}
+
+/// Correcting a word of an Arabic paragraph whose font (a synthetic one with a few letters) cannot
+/// draw the new word: it is set in the editor's Arabic face, shaped, drawn right to left, and the
+/// paragraph keeps its right edge. Needs the craft-fonts Arabic face.
+#[test]
+fn an_arabic_paragraph_is_corrected_shaped_right_to_left_and_keeps_its_right_edge() {
+    if pdfcraft_fonts::document_arabic_font().is_none() {
+        eprintln!("skipping the Arabic correction: built without a craft-fonts Arab face (set CRAFT_FONTS_DIR)");
+        return;
+    }
+    let new_word = "كتاب";
+    for content in [
+        "BT /F1 12 Tf 1 0 0 1 300 700 Tm (AAA AAB ABA ABB) Tj ET",
+        "BT /F1 12 Tf 14.4 TL 1 0 0 1 300 700 Tm (AAA AAB ABA ABB) Tj T* (BAA BAB BBA BBB) Tj ET",
+    ] {
+        let mut doc = arabic_ligature_page(content, false);
+        let before = text::text_blocks(&doc, 0).unwrap().remove(0);
+        assert!(crate::bidi::rtl_base(&before.editor_text), "{:?}", before.editor_text);
+        let replaced = before.editor_text.split([' ', '\n']).nth(1).unwrap().to_owned();
+        let draft = before.editor_text.replacen(&replaced, new_word, 1);
+        let edit = text::replace_block(&mut doc, 0, 0, &draft).unwrap();
+        assert!(edit.substituted.is_some(), "{edit:?}");
+        let doc = reopen(&doc);
+        let all = page_text(&doc);
+        assert!(all.contains(new_word) && !all.split_whitespace().any(|w| w == replaced) && !all.contains('?'), "{all}");
+        // Shaped by the face and drawn from right to left: the new word's letters are shown last
+        // letter first, each from a Type 3 font whose /ToUnicode gives the letter back.
+        let (joined, ops) = joined_ops(&doc);
+        let mut tables: std::collections::HashMap<String, std::collections::HashMap<u8, String>> = std::collections::HashMap::new();
+        let (mut font, mut drawn) = (String::new(), String::new());
+        for op in &ops {
+            if op.is("Tf") {
+                font = op.operands.first().and_then(|n| n.as_name()).map(|n| String::from_utf8_lossy(n).into_owned()).unwrap_or_default();
+            } else if op.is("Tj") && font.starts_with("PCAr") {
+                let table = tables.entry(font.clone()).or_insert_with(|| type3_codes(&doc, &font));
+                if let Some(Object::String(s)) = op.operands.first() {
+                    drawn.extend(s.bytes.iter().filter_map(|b| table.get(b)).map(String::as_str));
+                }
+            }
+        }
+        let reversed: String = new_word.chars().rev().collect();
+        assert!(drawn.contains(&reversed), "drawn {drawn:?} in {joined}");
+        // The paragraph keeps its direction and its right edge.
+        let blocks = text::text_blocks(&doc, 0).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert!(crate::bidi::rtl_base(&blocks[0].editor_text));
+        let lines = text::text_lines(&doc, 0).unwrap();
+        for index in &blocks[0].lines {
+            let right = lines[*index].rect[2];
+            assert!((right - before.rect[2]).abs() < 1.5, "line ends at {right}, the paragraph at {}", before.rect[2]);
+        }
+    }
+}

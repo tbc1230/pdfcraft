@@ -28,6 +28,7 @@ pub use fallback::strip_subset_tag;
 use regions::{alignment_frame, group_blocks, is_centred, rewrite_styled_block};
 pub use session::TextSession;
 
+mod arabic;
 mod blocks;
 mod editor;
 mod fallback;

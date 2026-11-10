@@ -2,7 +2,7 @@
 //! all links. Rectangles are points from the top-left of the displayed page.
 
 use pdfcraft_engine::{
-    Edit, LinkAction, LinkHighlight, LinkStyle, read_remote_document, remote_document_path_is_absolute, resolve_remote_document_path,
+    Edit, LinkAction, LinkFit, LinkHighlight, LinkStyle, read_remote_document, remote_document_path_is_absolute, resolve_remote_document_path,
 };
 use pdfcraft_render::{DestView, LinkTarget, RemoteDestination};
 use serde_json::{Value, json};
@@ -26,15 +26,32 @@ impl Automation {
     }
 
     fn link_action(&self, a: &Args) -> Result<Option<LinkAction>> {
-        match (a.opt_str("url")?, a.opt_int("to_page")?) {
+        let fit = match a.opt_str("fit")? {
+            None | Some("page") => LinkFit::Page,
+            Some("width") => LinkFit::Width,
+            Some("height") => LinkFit::Height,
+            Some(o) => return Err(bad(format!("fit must be page, width or height, not {o:?}"))),
+        };
+        let (url, to_page) = (a.opt_str("url")?, a.opt_int("to_page")?);
+        if url.is_some() && a.opt_str("fit")?.is_some() {
+            return Err(bad("fit goes with to_page, not url"));
+        }
+        if to_page.is_none() && a.opt_str("fit")?.is_some() {
+            return Err(bad("fit needs to_page"));
+        }
+        match (url, to_page) {
             (Some(_), Some(_)) => Err(bad("pass url or to_page, not both")),
-            (Some(u), None) => Ok(Some(LinkAction::Uri(u.to_string()))),
+            (Some(u), None) => {
+                // A link's address is a web address: http or https, with a host.
+                let u = pdfcraft_engine::link_web_address(u).map_err(|e| bad(e.to_string()))?;
+                Ok(Some(LinkAction::Uri(u)))
+            }
             (None, Some(p)) => {
                 let n = self.doc(a)?.info.pages.len() as i64;
                 if p < 1 || p > n {
                     return Err(bad(format!("to_page must be 1–{n}")));
                 }
-                Ok(Some(LinkAction::Page(p as usize - 1)))
+                Ok(Some(LinkAction::Page { page: p as usize - 1, fit }))
             }
             (None, None) => Ok(None),
         }
@@ -82,6 +99,13 @@ impl Automation {
                 match (&l.action, target) {
                     (LinkAction::Uri(u), _) => v["url"] = json!(u),
                     (action, Some((page, view))) => {
+                        if let LinkAction::Page { fit, .. } = action {
+                            v["fit"] = json!(match fit {
+                                LinkFit::Page => "page",
+                                LinkFit::Width => "width",
+                                LinkFit::Height => "height",
+                            });
+                        }
                         v["to_page"] = json!(page + 1);
                         if let Some(d) = doc.info.pages.get(page).and_then(|p| crate::destination(view, p)) {
                             v["destination"] = d;
@@ -90,7 +114,7 @@ impl Automation {
                             v["named"] = json!(true);
                         }
                     }
-                    (LinkAction::Page(p), None) => v["to_page"] = json!(p + 1),
+                    (LinkAction::Page { page, .. }, None) => v["to_page"] = json!(page + 1),
                     (LinkAction::Other(o), None) => v["other"] = json!(o),
                 }
                 v

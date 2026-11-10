@@ -97,6 +97,67 @@ impl TextBlock {
     }
 }
 
+impl TextBlock {
+    /// Which of the breaks between the paragraph's rows are only wraps (`true`) and which are line
+    /// breaks that were typed (`false`), read from how `reflow_text` joins `editor_text`. `None`
+    /// when the two do not line up row by row.
+    pub(crate) fn soft_breaks(&self) -> Option<Vec<bool>> {
+        let parts: Vec<&str> = self.editor_text.split('\n').collect();
+        if parts.len() < 2 || parts.len() != self.rows.len() {
+            return None;
+        }
+        let mut rest: &str = &self.reflow_text;
+        let mut soft = Vec::with_capacity(parts.len().saturating_sub(1));
+        for (i, part) in parts.iter().enumerate() {
+            // A wrap after a hyphen joins without it, and without a space.
+            rest = match rest.strip_prefix(part) {
+                Some(after) => after,
+                None => rest.strip_prefix(part.strip_suffix('-')?)?,
+            };
+            let Some(next) = parts.get(i + 1) else { break };
+            if let Some(after) = rest.strip_prefix('\n') {
+                soft.push(false);
+                rest = after;
+                continue;
+            }
+            // Joined: some spaces (the ones the wrap consumed, none after a hyphen), then the next row.
+            let spaces = rest.len().saturating_sub(rest.trim_start_matches(' ').len());
+            let core = next.strip_suffix('-').unwrap_or(next);
+            let skip = (0..=spaces).find(|k| rest.get(*k..).is_some_and(|tail| tail.starts_with(next) || tail.starts_with(core)))?;
+            soft.push(true);
+            rest = rest.get(skip..)?;
+        }
+        Some(soft)
+    }
+
+    /// The draft with the breaks `join` marks (by index, as [`TextBlock::soft_breaks`] numbers
+    /// them) taken back out, so that those rows are wrapped again to the paragraph's width: the
+    /// editor shows a newline for every row, and a word corrected into a longer or shorter one
+    /// would otherwise leave every row break where it was. A draft with a break added or taken
+    /// out is returned as typed.
+    pub(crate) fn joined_draft(&self, draft: &str, join: &[bool]) -> String {
+        let parts: Vec<&str> = draft.split('\n').collect();
+        if parts.len() != join.len().saturating_add(1) {
+            return draft.to_owned();
+        }
+        let source: Vec<&str> = self.editor_text.split('\n').collect();
+        let mut out = String::with_capacity(draft.len());
+        for (i, part) in parts.iter().enumerate() {
+            out.push_str(part);
+            let Some(next) = parts.get(i + 1) else { break };
+            if !join.get(i).copied().unwrap_or(false) {
+                out.push('\n');
+            } else if part.ends_with('-') && source.get(i).is_some_and(|row| row.ends_with('-')) {
+                // The wrap fell after a hyphen: the row joins to the next without it.
+                out.pop();
+            } else if !(part.ends_with(char::is_whitespace) || next.starts_with(char::is_whitespace)) {
+                out.push(' ');
+            }
+        }
+        out
+    }
+}
+
 /// Changed words [`TextBlock::edited_spans`] aligns before it treats the draft as one change.
 /// Myers' diff costs O((N + M) · D), so bounding D keeps it linear.
 const MAX_CHANGED_WORDS: usize = 64;

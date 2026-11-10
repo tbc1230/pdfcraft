@@ -3,7 +3,7 @@
 //! their outlines, a click selects one, a double-click edits it and Delete removes it.
 
 use egui::{Color32, CornerRadius, Pos2, Rect, Stroke};
-use pdfcraft_engine::{Edit, LinkAction, LinkHighlight, LinkItem, LinkStyle};
+use pdfcraft_engine::{Edit, LinkAction, LinkFit, LinkHighlight, LinkItem, LinkStyle, link_web_address};
 use pdfcraft_render::{DocInfo, LinkTarget};
 
 use crate::canvas::{DocView, PageToolContext, PageXform};
@@ -44,9 +44,34 @@ pub struct LinkDraft {
     pub preserve_action: bool,
     pub web: bool,
     pub url: String,
-    /// 1-based target page.
-    pub target: usize,
+    /// The target page as typed (1-based): a number entry, so it can be empty or wrong.
+    pub target: String,
+    /// How the target page is shown.
+    pub fit: LinkFit,
     pub style: LinkStyle,
+}
+
+/// A drag below this many points on a side (page user space) is a slip, not a link.
+const SLIP: f64 = 2.0;
+
+/// The link area of a drag from `a` to `b` (user space), or `None` for a slip: a side under
+/// [`SLIP`] points, or a point that is not a finite number.
+pub(crate) fn drawn_link_rect(a: [f64; 2], b: [f64; 2]) -> Option<[f64; 4]> {
+    let r = [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])];
+    (r.iter().all(|v| v.is_finite()) && r[2] - r[0] >= SLIP && r[3] - r[1] >= SLIP).then_some(r)
+}
+
+/// The page (0-based) a typed page number names in a document of `pages` pages: a whole number
+/// from 1 to `pages`; empty, zero, negative, too large or non-numeric text names none.
+pub(crate) fn typed_page(text: &str, pages: usize) -> Option<usize> {
+    let n: usize = text.trim().parse().ok()?;
+    (n >= 1 && n <= pages).then(|| n - 1)
+}
+
+/// Whether the draft's target can be accepted: a kept action, a web address (see
+/// [`link_web_address`]) or a page of the document.
+pub(crate) fn target_ok(d: &LinkDraft, pages: usize) -> bool {
+    d.preserve_action || if d.web { link_web_address(&d.url).is_ok() } else { typed_page(&d.target, pages).is_some() }
 }
 
 fn screen_rect(xf: &PageXform, info: &DocInfo, page: usize, r: [f64; 4]) -> Rect {
@@ -107,9 +132,12 @@ pub(crate) fn page_input(cx: PageToolContext<'_>, free: bool, owner: Option<usiz
             lv.drag = None;
             let end = pointer.unwrap_or(start);
             let r = Rect::from_two_pos(start, end).intersect(xf.rect);
-            if r.width() >= 4.0 && r.height() >= 4.0 {
+            // The slip rule is in page points, as for the shapes of the comment tools.
+            if r.is_positive() {
                 let (a, b) = (to_user(xf, info, page, r.min), to_user(xf, info, page, r.max));
-                lv.open_new = Some((page, [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])]));
+                if let Some(rect) = drawn_link_rect(a, b) {
+                    lv.open_new = Some((page, rect));
+                }
             }
         }
         return true;
@@ -194,15 +222,25 @@ impl PdfCraftApp {
                 page,
                 rect: l.rect,
                 index,
-                preserve_action: matches!(l.action, LinkAction::Other(_)),
+                // An action Link Properties cannot offer stays as it is, a web address that is not
+                // an http or https one (written by another program) included.
+                preserve_action: match &l.action {
+                    LinkAction::Other(_) => true,
+                    LinkAction::Uri(u) => link_web_address(u).is_err(),
+                    LinkAction::Page { .. } => false,
+                },
                 web: matches!(l.action, LinkAction::Uri(_)),
                 url: match &l.action {
                     LinkAction::Uri(u) => u.clone(),
                     _ => "https://".into(),
                 },
                 target: match l.action {
-                    LinkAction::Page(p) => p + 1,
-                    _ => 1,
+                    LinkAction::Page { page, .. } => page.saturating_add(1).to_string(),
+                    _ => "1".into(),
+                },
+                fit: match l.action {
+                    LinkAction::Page { fit, .. } => fit,
+                    _ => LinkFit::Page,
                 },
                 style: l.style,
             },
@@ -213,7 +251,8 @@ impl PdfCraftApp {
                 preserve_action: false,
                 web: true,
                 url: "https://".into(),
-                target: 1,
+                target: "1".into(),
+                fit: LinkFit::Page,
                 style: LinkStyle::default(),
             },
         };
@@ -335,14 +374,31 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut LinkDraft, pages: usize, t: &Token
             ui.horizontal(|ui| {
                 ui.add_space(24.0);
                 ui.label(tl!("Page"));
-                ui.add(egui::DragValue::new(&mut d.target).range(1..=pages.max(1)));
+                ui.add(crate::widgets::line(&mut d.target).desired_width(60.0)).accessible_name(tl!("Page"));
                 ui.label(crate::i18n::fmt(tl!("of {name}"), &[("name", &pages.to_string())]));
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(24.0);
+                craft_ui::ComboBox::from_id_salt("link-fit").selected_text(tl!(d.fit.label())).show_ui(ui, |ui| {
+                    for f in LinkFit::ALL {
+                        ui.selectable_value(&mut d.fit, f, tl!(f.label()));
+                    }
+                });
             });
         });
     }
-    let ok = d.preserve_action || !d.web || (d.url.trim().len() > 3 && d.url.trim() != "https://");
+    let ok = target_ok(d, pages);
     if !ok {
-        ui.label(egui::RichText::new(tl!("Type the web address.")).small().color(t.text_faint));
+        let message = if d.web {
+            if d.url.trim().is_empty() || d.url.trim() == "https://" {
+                tl!("Type the web address.").to_string()
+            } else {
+                tl!("Type a web address that begins with http:// or https://.").to_string()
+            }
+        } else {
+            crate::i18n::fmt(tl!("Type a page number from 1 to {n}."), &[("n", &pages.max(1).to_string())])
+        };
+        ui.label(egui::RichText::new(message).small().color(t.text_faint));
     }
     ui.add_space(12.0);
     let (mut a, mut c) = (false, false);
@@ -357,35 +413,100 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut LinkDraft, pages: usize, t: &Token
     (a, c)
 }
 
+/// The action a draft asks for. A page number that names no page (the dialog does not let such a
+/// draft be accepted) falls back to the first page.
+fn action_for(d: &LinkDraft) -> LinkAction {
+    if d.web {
+        LinkAction::Uri(d.url.trim().to_string())
+    } else {
+        LinkAction::Page { page: typed_page(&d.target, usize::MAX).unwrap_or(0), fit: d.fit }
+    }
+}
+
 /// The edit for a confirmed draft.
 pub(crate) fn edit_for(d: &LinkDraft) -> Edit {
     match d.index {
-        None => Edit::AddLink {
-            page: d.page,
-            rect: d.rect,
-            action: if d.web { LinkAction::Uri(d.url.trim().to_string()) } else { LinkAction::Page(d.target.saturating_sub(1)) },
-            style: d.style,
-        },
-        Some(index) => Edit::SetLink {
-            page: d.page,
-            index,
-            rect: None,
-            action: (!d.preserve_action)
-                .then(|| if d.web { LinkAction::Uri(d.url.trim().to_string()) } else { LinkAction::Page(d.target.saturating_sub(1)) }),
-            style: Some(d.style),
-        },
+        None => Edit::AddLink { page: d.page, rect: d.rect, action: action_for(d), style: d.style },
+        Some(index) => Edit::SetLink { page: d.page, index, rect: None, action: (!d.preserve_action).then(|| action_for(d)), style: Some(d.style) },
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LinkDraft, edit_for};
-    use pdfcraft_engine::{Edit, LinkStyle};
+    use super::{LinkDraft, drawn_link_rect, edit_for, target_ok, typed_page};
+    use pdfcraft_engine::{Edit, LinkAction, LinkFit, LinkStyle};
+
+    fn draft(web: bool, url: &str, target: &str) -> LinkDraft {
+        LinkDraft {
+            page: 0,
+            rect: [0.0, 0.0, 10.0, 10.0],
+            index: None,
+            preserve_action: false,
+            web,
+            url: url.into(),
+            target: target.into(),
+            fit: LinkFit::Page,
+            style: LinkStyle::default(),
+        }
+    }
 
     #[test]
     fn appearance_edit_preserves_an_existing_unsupported_action() {
         let style = LinkStyle::default();
-        let draft = LinkDraft { page: 0, rect: [0.0; 4], index: Some(3), preserve_action: true, web: false, url: String::new(), target: 1, style };
+        let draft = LinkDraft {
+            page: 0,
+            rect: [0.0; 4],
+            index: Some(3),
+            preserve_action: true,
+            web: false,
+            url: String::new(),
+            target: "1".into(),
+            fit: LinkFit::Page,
+            style,
+        };
         assert_eq!(edit_for(&draft), Edit::SetLink { page: 0, index: 3, rect: None, action: None, style: Some(style) });
+    }
+
+    #[test]
+    fn only_a_web_address_with_a_host_is_accepted() {
+        for ok in ["http://example.org/a", "https://example.org", "HTTP://EXAMPLE.ORG"] {
+            assert!(target_ok(&draft(true, ok, "1"), 4), "{ok}");
+        }
+        for bad in ["", "example.org", "file:///C:/x.pdf", "javascript:alert(1)", "mailto:a@b.c", "ftp://x.org/f", "https://", "data:text/html,x"] {
+            assert!(!target_ok(&draft(true, bad, "1"), 4), "{bad:?}");
+        }
+        // A kept action is accepted whatever it is.
+        let mut kept = draft(true, "mailto:a@b.c", "1");
+        kept.preserve_action = true;
+        assert!(target_ok(&kept, 4));
+    }
+
+    #[test]
+    fn a_page_number_must_name_a_page_of_the_document() {
+        assert_eq!((typed_page("1", 4), typed_page(" 4 ", 4)), (Some(0), Some(3)));
+        for bad in ["", " ", "0", "5", "-1", "1.5", "two", "99999999999999999999999"] {
+            assert_eq!(typed_page(bad, 4), None, "{bad:?}");
+            assert!(!target_ok(&draft(false, "", bad), 4));
+        }
+        assert!(target_ok(&draft(false, "", "3"), 4));
+    }
+
+    #[test]
+    fn a_page_target_carries_its_fit_into_the_edit() {
+        for fit in LinkFit::ALL {
+            let mut d = draft(false, "", "3");
+            d.fit = fit;
+            assert!(matches!(edit_for(&d), Edit::AddLink { action: LinkAction::Page { page: 2, fit: f }, .. } if f == fit));
+        }
+    }
+
+    #[test]
+    fn a_drag_under_two_points_on_a_side_draws_no_link() {
+        assert_eq!(drawn_link_rect([10.0, 10.0], [11.9, 50.0]), None);
+        assert_eq!(drawn_link_rect([10.0, 10.0], [50.0, 11.9]), None);
+        assert_eq!(drawn_link_rect([10.0, 10.0], [10.0, 10.0]), None);
+        assert_eq!(drawn_link_rect([f64::NAN, 0.0], [50.0, 50.0]), None);
+        assert_eq!(drawn_link_rect([50.0, 40.0], [10.0, 10.0]), Some([10.0, 10.0, 50.0, 40.0]));
+        assert!(drawn_link_rect([0.0, 0.0], [2.0, 2.0]).is_some());
     }
 }

@@ -675,7 +675,10 @@ fn dialog_properties(ui: &mut egui::Ui, app: &mut PdfCraftApp, req: &mut Pending
                 None => {
                     row(ui, "Security method", tl!("No security").to_string());
                     row(ui, "Restrictions", tl!("None — everything is allowed").to_string());
-                    if doc.allows_security_change() && ui.button(tl!("Protect using password…")).clicked() {
+                    if crate::commands::offered("protect.password")
+                        && doc.allows_security_change()
+                        && ui.button(tl!("Protect using password…")).clicked()
+                    {
                         req.link_command = Some("protect.password");
                     }
                 }
@@ -693,16 +696,19 @@ fn dialog_properties(ui: &mut egui::Ui, app: &mut PdfCraftApp, req: &mut Pending
                             tl!("User password").to_string()
                         },
                     );
-                    // A restricted document asks for its permissions password first.
-                    if doc.allows_security_change() || doc.can_unlock() {
+                    // A restricted document asks for its permissions password first. Where Workspace
+                    // owns the passwords (the web build) Unlock is all there is: Change settings and
+                    // Remove security are not offered, like their commands.
+                    let change = crate::commands::offered("protect.password") || crate::commands::offered("protect.remove");
+                    if doc.can_unlock() || (change && doc.allows_security_change()) {
                         ui.horizontal(|ui| {
                             if doc.can_unlock() && ui.button(tl!("Unlock…")).clicked() {
                                 req.link_command = Some("protect.unlock");
                             }
-                            if ui.button(tl!("Change settings…")).clicked() {
+                            if crate::commands::offered("protect.password") && ui.button(tl!("Change settings…")).clicked() {
                                 req.link_command = Some("protect.password");
                             }
-                            if ui.button(tl!("Remove security")).clicked() {
+                            if crate::commands::offered("protect.remove") && ui.button(tl!("Remove security")).clicked() {
                                 req.link_command = Some("protect.remove");
                             }
                         });
@@ -1985,8 +1991,14 @@ fn finish_close(app: &mut PdfCraftApp, dialog: Dialog, modal_closed: bool, req: 
     } else {
         app.dialog = Some(req.next.unwrap_or(dialog));
     }
-    if let Some(cmd) = req.link_command {
-        app.execute(cmd);
+    match req.link_command {
+        // The Unlock button of the Security tab asks for the password as the notice's Unlock does,
+        // in every build: the command itself is not on the web build's list.
+        Some("protect.unlock") => app.request_unlock(None),
+        Some(cmd) => {
+            app.execute(cmd);
+        }
+        None => {}
     }
     if let Some(n) = req.open_revision {
         app.open_revision(n);
